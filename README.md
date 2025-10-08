@@ -1,3 +1,111 @@
+## SignMotionGPT — LLM Fine‑tuning (Colab & Kaggle)
+
+This repo contains utilities to fine‑tune the LLM component in three stages with resilient checkpointing to the Hugging Face Hub. Training can start in Colab and resume in Kaggle (or vice‑versa) without losing progress.
+
+### What’s included
+- Two‑point Hub checkpointing (halfway and final) with auto‑resume
+- Per‑stage Hub repos (defaults):
+  - `rdz-falcon/signmotiongpt-stage1`
+  - `rdz-falcon/signmotiongpt-stage2`
+  - `rdz-falcon/signmotiongpt-stage3`
+- Dynamic `WORK_DIR` and dataset path defaults to the current directory
+- Setup script to install dependencies and (optionally) download a dataset from a public Google Drive link
+
+---
+
+### 1) Configure setup script (one time)
+Edit the placeholders in `setup_env.sh` so no arguments are required when running it:
+
+```bash
+# setup_env.sh
+GDRIVE_ID="YOUR_GOOGLE_DRIVE_FILE_ID_HERE"      # replace with the public file ID of your dataset
+HF_TOKEN_IN="YOUR_HUGGINGFACE_TOKEN_HERE"      # replace with your HF token (starts with hf_)
+```
+
+Notes:
+- The script installs dependencies from `requirements.txt`.
+- If `GDRIVE_ID` is provided, it downloads the dataset into `./data/motion_llm_dataset.json`.
+- If `HF_TOKEN_IN` is provided, it exports `HUGGINGFACE_HUB_TOKEN` in the current shell.
+- You can use Git Bash or WSL on Windows to run the script.
+
+Run the setup:
+
+```bash
+bash setup_env.sh
+```
+
+After setup, defaults are:
+- `WORK_DIR` = current directory
+- `DATA_JSON_PATH` = `./data/motion_llm_dataset.json`
+
+You can override via environment variables if needed:
+
+```bash
+export WORK_DIR=/path/to/workdir
+export DATA_JSON_PATH=/path/to/motion_llm_dataset.json
+```
+
+---
+
+### 2) Configuration
+All key settings live in `config.py`:
+- `WORK_DIR`, `DATA_DIR`, `DATA_JSON_PATH` (defaults to current working dir)
+- Hub:
+  - `HF_USER` (defaults to `rdz-falcon`)
+  - `HF_TOKEN` (auto‑read from `HUGGINGFACE_HUB_TOKEN` env)
+  - `HUB_REPO_S1`, `HUB_REPO_S2`, `HUB_REPO_S3`
+- Training hyperparameters and stage output directories (`OUT_S1`, `OUT_S2`, `OUT_S3`)
+
+Ensure Kaggle has Internet enabled when training. If you embed your token in the script, avoid committing secrets publicly.
+
+---
+
+### 3) Training
+The trainer saves exactly two checkpoints to the Hub per stage (halfway and final), and will automatically resume from the latest Hub checkpoint when re‑run in Colab or Kaggle.
+
+Example pattern for calling a stage (your pipeline code may differ):
+
+```python
+from train import train_stage
+from config import OUT_S1, EPOCHS_S1
+
+# Build or load your model, tokenizer, datasets, and data collator here
+# model, tokenizer = ...
+# train_ds, eval_ds = ...
+# collator = ...
+
+train_stage(
+    stage_name="stage1",
+    model=model,
+    tokenizer=tokenizer,
+    train_dataset=train_ds,
+    eval_dataset=eval_ds,
+    data_collator=collator,
+    out_dir=OUT_S1,
+    epochs=EPOCHS_S1,
+    # hub_repo optional — if omitted, auto‑uses rdz-falcon/signmotiongpt-stage1
+)
+```
+
+Stage naming:
+- If `stage_name` starts with `stage1`/`stage2`/`stage3`, the corresponding Hub repo from `config.py` is used automatically when not explicitly provided.
+
+---
+
+### 4) Checkpointing details
+- Saves to Hub at two points: halfway step and final step
+- Keeps only the most recent two checkpoints on the Hub per stage
+- Resumes from the latest Hub checkpoint automatically on the next run
+- Designed to work with Unsloth + 4‑bit + LoRA (PEFT)
+
+---
+
+### 5) Troubleshooting
+- Kaggle: enable Internet for training sessions
+- Ensure `HUGGINGFACE_HUB_TOKEN` is valid (private repos are supported)
+- Verify dataset exists at `DATA_JSON_PATH` (`./data/motion_llm_dataset.json` by default)
+- If resuming fails, check that the Hub repo contains a `checkpoint-<step>/` directory and `trainer_state.json`
+
 # Motion LLM: Text-to-Motion Generation with Language Models
 
 A 3-stage training pipeline for fine-tuning language models on discrete motion tokens for text-to-motion generation tasks.

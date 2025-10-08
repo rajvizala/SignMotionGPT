@@ -99,16 +99,31 @@ def main():
     mapper_s1 = create_mapper(1, has_pid)
     train_s1, val_s1 = make_splits(raw_ds, mapper_s1, MAX_TRAIN_SAMPLES_S1)
     print(f"Stage 1 - Train: {len(train_s1)}, Val: {len(val_s1)}")
+    # Show 1 sample (Stage 1)
+    if len(train_s1) > 0:
+        s1_example = train_s1[0]
+        print("\n[Sample] Stage 1 mapped example:")
+        print({k: (v[:240] + '...') if isinstance(v, str) and len(v) > 240 else v for k, v in s1_example.items()})
     
     # Stage 2: Multi-task
     mapper_s2 = create_mapper(2, has_pid)
     train_s2, val_s2 = make_splits(raw_ds, mapper_s2, MAX_TRAIN_SAMPLES_S2)
     print(f"Stage 2 - Train: {len(train_s2)}, Val: {len(val_s2)}")
+    # Show 1 sample (Stage 2)
+    if len(train_s2) > 0:
+        s2_example = train_s2[0]
+        print("\n[Sample] Stage 2 mapped example:")
+        print({k: (v[:240] + '...') if isinstance(v, str) and len(v) > 240 else v for k, v in s2_example.items()})
     
     # Stage 3: T2M SFT
     mapper_s3 = create_mapper(3, has_pid)
     train_s3, val_s3 = make_splits(raw_ds, mapper_s3, MAX_TRAIN_SAMPLES_S3)
     print(f"Stage 3 - Train: {len(train_s3)}, Val: {len(val_s3)}")
+    # Show 1 sample (Stage 3)
+    if len(train_s3) > 0:
+        s3_example = train_s3[0]
+        print("\n[Sample] Stage 3 mapped example:")
+        print({k: (v[:240] + '...') if isinstance(v, str) and len(v) > 240 else v for k, v in s3_example.items()})
     
     # Create data collator
     collator = AssistantSpanCollator(tokenizer, MAX_SEQ_LEN)

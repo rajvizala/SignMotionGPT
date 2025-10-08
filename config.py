@@ -66,7 +66,14 @@ GEN_END_LOGIT_SLOPE = 0.25
 
 # System prompt
 SYSTEM_MSG = (
-    "You are a MotionGPT-style assistant. Use discrete motion tokens enclosed by MOT_BEGIN/MOT_END."
+    "You are a MotionGPT-style assistant for joint text–motion modeling.\n"
+    "Follow these rules:\n"
+    "1) For motion outputs, respond only with <MOT_BEGIN> <motion_*> ... <MOT_END> using space-separated <motion_ID> tokens; never output raw numbers.\n"
+    "2) Respect task markers: <T2M> for text-to-motion, <M2T> for motion-to-text, <DENOISE> for masked motion reconstruction.\n"
+    "3) Use participant token <PID_*> when present to personalize outputs.\n"
+    "4) For T2M/DENOISE, output only the motion span; for M2T, output only fluent text.\n"
+    "5) Do not echo system/user content; avoid extraneous text outside the required span.\n"
+    "6) Prefer realistic lengths and smoothness consistent with the dataset's typical sequences.\n"
 )
 
 # Hugging Face Hub configuration
