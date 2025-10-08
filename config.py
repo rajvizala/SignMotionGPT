@@ -1,14 +1,23 @@
 """
 Configuration file for Motion LLM training
 """
+import os
 import torch
 
 # Random seed
 SEED = 42
 
 # Paths
-DATA_JSON_PATH = "/kaggle/input/final-motion-llm-dataset/motion_llm_dataset.json"
-WORK_DIR = "/kaggle/working"
+# WORK_DIR defaults to current working directory if not explicitly set
+WORK_DIR = os.environ.get("WORK_DIR", os.getcwd())
+DATA_DIR = os.environ.get("DATA_DIR", os.path.join(WORK_DIR, "data"))
+os.makedirs(DATA_DIR, exist_ok=True)
+
+# Single-file JSON dataset path (can be overridden via env)
+DATA_JSON_PATH = os.environ.get(
+    "DATA_JSON_PATH",
+    os.path.join(DATA_DIR, "motion_llm_dataset.json"),
+)
 OUT_S1 = f"{WORK_DIR}/stage1_mlm"
 OUT_S2 = f"{WORK_DIR}/stage2_multitask"
 OUT_S3 = f"{WORK_DIR}/stage3_t2m_sft"
@@ -59,3 +68,13 @@ GEN_END_LOGIT_SLOPE = 0.25
 SYSTEM_MSG = (
     "You are a MotionGPT-style assistant. Use discrete motion tokens enclosed by MOT_BEGIN/MOT_END."
 )
+
+# Hugging Face Hub configuration
+# Set HF_TOKEN via environment or here for convenience (prefer environment for security).
+HF_TOKEN = os.environ.get("HUGGINGFACE_HUB_TOKEN", "")
+HF_USER = os.environ.get("HF_USER", "rdz-falcon")
+
+# Per-stage Hub repos (override via env if needed)
+HUB_REPO_S1 = os.environ.get("HUB_REPO_S1", f"{HF_USER}/signmotiongpt-stage1")
+HUB_REPO_S2 = os.environ.get("HUB_REPO_S2", f"{HF_USER}/signmotiongpt-stage2")
+HUB_REPO_S3 = os.environ.get("HUB_REPO_S3", f"{HF_USER}/signmotiongpt-stage3")
