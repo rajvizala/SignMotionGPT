@@ -14,8 +14,8 @@ DATA_DIR="$THIS_DIR/data"
 mkdir -p "$DATA_DIR"
 
 # --- Explicit placeholders (replace these later) ---
-GDRIVE_ID="YOUR_GOOGLE_DRIVE_FILE_ID_HERE"
-HF_TOKEN_IN="YOUR_HUGGINGFACE_TOKEN_HERE"
+GDRIVE_ID="11711RgTmzauXpYVFoqLF8DZXiZlZovfn"
+HF_TOKEN_IN="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"
 # ---------------------------------------------------
 
 echo "Installing Python dependencies..."
