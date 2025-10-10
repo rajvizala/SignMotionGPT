@@ -15,7 +15,7 @@ mkdir -p "$DATA_DIR"
 
 # --- Explicit placeholders (replace these later) ---
 GDRIVE_ID="11711RgTmzauXpYVFoqLF8DZXiZlZovfn"
-HF_TOKEN_IN="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"
+HF_TOKEN_IN=""
 # ---------------------------------------------------
 
 echo "Installing Python dependencies..."
