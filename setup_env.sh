@@ -14,7 +14,15 @@ DATA_DIR="$THIS_DIR/data"
 mkdir -p "$DATA_DIR"
 
 # --- Explicit placeholders (replace these later) ---
+# Training dataset
 GDRIVE_ID="11711RgTmzauXpYVFoqLF8DZXiZlZovfn"
+
+# Visualization assets (optional - only needed for visualize.py)
+VQVAE_MODEL_ID="YOUR_VQVAE_CHECKPOINT_GDRIVE_ID_HERE"
+VQVAE_STATS_ID="YOUR_VQVAE_STATS_GDRIVE_ID_HERE"
+SMPLX_MODELS_ID="YOUR_SMPLX_MODELS_GDRIVE_ID_HERE"
+
+# Hugging Face token
 HF_TOKEN_IN=""
 # ---------------------------------------------------
 
@@ -22,12 +30,31 @@ echo "Installing Python dependencies..."
 python -m pip install --upgrade pip
 pip install -r requirements.txt
 
-if [[ -n "$GDRIVE_ID" ]]; then
-  echo "Downloading dataset from Google Drive (file id: $GDRIVE_ID)..."
-  # Save to standard filename expected by config.py
+if [[ -n "$GDRIVE_ID" ]] && [[ "$GDRIVE_ID" != "YOUR_GOOGLE_DRIVE_FILE_ID_HERE" ]]; then
+  echo "Downloading training dataset from Google Drive (file id: $GDRIVE_ID)..."
   gdown --id "$GDRIVE_ID" -O "$DATA_DIR/motion_llm_dataset.json"
 else
-  echo "No Google Drive file id provided. Skipping dataset download."
+  echo "No training dataset Google Drive ID provided. Skipping dataset download."
+fi
+
+# Download visualization assets if IDs are provided
+if [[ -n "$VQVAE_MODEL_ID" ]] && [[ "$VQVAE_MODEL_ID" != "YOUR_VQVAE_CHECKPOINT_GDRIVE_ID_HERE" ]]; then
+  echo "Downloading VQ-VAE model from Google Drive (file id: $VQVAE_MODEL_ID)..."
+  gdown --id "$VQVAE_MODEL_ID" -O "$DATA_DIR/vqvae_model.pt"
+fi
+
+if [[ -n "$VQVAE_STATS_ID" ]] && [[ "$VQVAE_STATS_ID" != "YOUR_VQVAE_STATS_GDRIVE_ID_HERE" ]]; then
+  echo "Downloading VQ-VAE stats from Google Drive (file id: $VQVAE_STATS_ID)..."
+  gdown --id "$VQVAE_STATS_ID" -O "$DATA_DIR/vqvae_stats.pt"
+fi
+
+if [[ -n "$SMPLX_MODELS_ID" ]] && [[ "$SMPLX_MODELS_ID" != "YOUR_SMPLX_MODELS_GDRIVE_ID_HERE" ]]; then
+  echo "Downloading SMPL-X models from Google Drive (file id: $SMPLX_MODELS_ID)..."
+  mkdir -p "$DATA_DIR/smplx_models"
+  gdown --id "$SMPLX_MODELS_ID" -O "$DATA_DIR/smplx_models.zip"
+  unzip -q "$DATA_DIR/smplx_models.zip" -d "$DATA_DIR/smplx_models"
+  rm "$DATA_DIR/smplx_models.zip"
+  echo "SMPL-X models extracted to $DATA_DIR/smplx_models"
 fi
 
 if [[ -n "$HF_TOKEN_IN" ]]; then

@@ -1,237 +1,243 @@
 """
-Standalone inference script for Motion LLM
+Inference script for generating motion tokens from text prompts.
+Run after training to generate motion sequences from any text description.
+
+Usage:
+    python inference.py --prompt "walking forward" --stage 3
+    python inference.py --prompt "dancing" --stage 2 --output motion_output.txt
 """
+import os
 import argparse
-import json
 import torch
-from typing import Optional, List
-from data import (
-    load_dataset, build_motion_vocab, compute_length_stats,
-    build_prompt_vocab, motion_specials_to_ids
+from pathlib import Path
+
+from config import (
+    OUT_S1, OUT_S2, OUT_S3, MAX_SEQ_LEN, DATA_JSON_PATH,
+    WORK_DIR
 )
-from model import get_motion_token_info
+from data import (
+    load_dataset, compute_length_stats, build_prompt_vocab,
+    check_has_participant_id
+)
+from model import setup_model_and_tokenizer, get_motion_token_info
 from generate import generate_t2m
-from train import load_model_from_hub
 
 
-class MotionGenerator:
+def load_trained_model(stage: int, device: torch.device):
     """
-    Easy-to-use interface for motion generation
+    Load a trained model from a specific stage checkpoint.
+    
+    Args:
+        stage: Stage number (1, 2, or 3)
+        device: Device to load model on
+    
+    Returns:
+        model, tokenizer, motion_token_ids, mot_begin_id, mot_end_id
     """
+    stage_dirs = {1: OUT_S1, 2: OUT_S2, 3: OUT_S3}
+    stage_dir = stage_dirs.get(stage)
     
-    def __init__(
-        self,
-        model_path: str,
-        dataset_path: str,
-        device: str = "cuda:0"
-    ):
-        """
-        Initialize generator
-        
-        Args:
-            model_path: Path to trained model (local or HF hub)
-            dataset_path: Path to training dataset JSON (for stats)
-            device: Device to run inference on
-        """
-        print(f"Loading model from {model_path}...")
-        
-        # Load model and tokenizer
-        self.model, self.tokenizer = load_model_from_hub(model_path)
-        self.device = torch.device(device if torch.cuda.is_available() else "cpu")
-        self.model.to(self.device)
-        self.model.eval()
-        
-        # Load dataset for statistics
-        print(f"Loading dataset from {dataset_path}...")
-        self.dataset = load_dataset(dataset_path)
-        
-        # Build vocabulary and stats
-        print("Building motion vocabulary and statistics...")
-        codebook_size, _ = build_motion_vocab(self.dataset)
-        self.length_stats_by_text, self.global_median_len = compute_length_stats(self.dataset)
-        self.prompt_vocab = build_prompt_vocab(self.dataset)
-        
-        # Get motion token IDs
-        self.motion_token_ids, self.mot_begin_id, self.mot_end_id = get_motion_token_info(
-            self.tokenizer, codebook_size
+    if not stage_dir or not os.path.exists(stage_dir):
+        raise FileNotFoundError(
+            f"Stage {stage} checkpoint not found at {stage_dir}. "
+            f"Train stage {stage} first."
         )
-        
-        # Check for participant IDs
-        self.has_pid = "participant_id" in self.dataset.column_names
-        
-        print("✓ Generator ready!")
     
-    def generate(
-        self,
-        prompt: str,
-        participant_id: Optional[str] = None,
-        max_new_tokens: int = 256,
-        per_prompt_vocab: bool = True,
-        return_tokens: bool = True
-    ) -> str:
-        """
-        Generate motion from text prompt
-        
-        Args:
-            prompt: Text description of motion
-            participant_id: Optional participant ID for personalized generation
-            max_new_tokens: Maximum tokens to generate
-            per_prompt_vocab: Restrict to tokens seen with this prompt in training
-            return_tokens: If True, return space-separated token IDs. If False, return full response
-        
-        Returns:
-            Generated motion tokens (space-separated IDs) or full response
-        """
-        # Generate
-        response = generate_t2m(
-            model=self.model,
-            tokenizer=self.tokenizer,
-            prompt_text=prompt,
-            mot_begin_id=self.mot_begin_id,
-            mot_end_id=self.mot_end_id,
-            motion_token_ids=self.motion_token_ids,
-            length_stats_by_text=self.length_stats_by_text,
-            global_median_len=self.global_median_len,
-            prompt_vocab=self.prompt_vocab if per_prompt_vocab else None,
-            pid=participant_id,
-            has_pid=self.has_pid,
-            max_new_tokens=max_new_tokens,
-            per_prompt_vocab=per_prompt_vocab
-        )
-        
-        if return_tokens:
-            # Extract motion tokens
-            span = response.split("<MOT_BEGIN>")[-1]
-            span = span.split("<MOT_END>")[0]
-            token_ids = motion_specials_to_ids(span)
-            return " ".join(str(id) for id in token_ids)
-        else:
-            return response
+    print(f"\nLoading Stage {stage} model from: {stage_dir}")
     
-    def generate_batch(
-        self,
-        prompts: List[str],
-        **kwargs
-    ) -> List[str]:
-        """
-        Generate motions for multiple prompts
-        
-        Args:
-            prompts: List of text descriptions
-            **kwargs: Additional arguments passed to generate()
-        
-        Returns:
-            List of generated motion token sequences
-        """
-        results = []
-        for prompt in prompts:
-            result = self.generate(prompt, **kwargs)
-            results.append(result)
-        return results
+    # Load dataset to build vocab (needed for model setup)
+    if not os.path.exists(DATA_JSON_PATH):
+        raise FileNotFoundError(f"Dataset not found: {DATA_JSON_PATH}")
+    
+    raw_ds = load_dataset(DATA_JSON_PATH)
+    
+    # Build motion vocab
+    def max_token_in_example(ex):
+        return max(int(x) for x in ex["motion_tokens"].split())
+    
+    global_max_id = max(max_token_in_example(ex) for ex in raw_ds)
+    codebook_size = global_max_id + 1
+    
+    # Check for participant IDs
+    has_pid = check_has_participant_id(raw_ds)
+    unique_pids = None
+    if has_pid:
+        unique_pids = sorted({str(ex["participant_id"]) for ex in raw_ds})
+    
+    # Setup model and tokenizer with same config as training
+    model, tokenizer, _ = setup_model_and_tokenizer(codebook_size, unique_pids)
+    
+    # Load trained weights from checkpoint
+    # Try different checkpoint naming patterns
+    possible_ckpts = [
+        os.path.join(stage_dir, "pytorch_model.bin"),
+        os.path.join(stage_dir, "model.safetensors"),
+        os.path.join(stage_dir, "adapter_model.bin"),
+    ]
+    
+    loaded = False
+    for ckpt_path in possible_ckpts:
+        if os.path.exists(ckpt_path):
+            print(f"Loading checkpoint: {ckpt_path}")
+            # Unsloth/PEFT models save adapters separately
+            # The model will auto-load from the directory
+            loaded = True
+            break
+    
+    if not loaded:
+        print(f"⚠️  No explicit checkpoint file found, using model directory: {stage_dir}")
+    
+    # Move model to device
+    model.to(device)
+    model.eval()
+    
+    # Get motion token info
+    motion_token_ids, mot_begin_id, mot_end_id = get_motion_token_info(
+        tokenizer, codebook_size
+    )
+    
+    print(f"✅ Stage {stage} model loaded successfully")
+    print(f"   Vocabulary size: {len(tokenizer)}")
+    print(f"   Motion tokens: {len(motion_token_ids)}")
+    
+    return model, tokenizer, motion_token_ids, mot_begin_id, mot_end_id, raw_ds
+
+
+def inference(
+    prompt: str,
+    stage: int = 3,
+    pid: str = None,
+    output_file: str = None,
+    per_prompt_vocab: bool = True,
+    device: torch.device = None
+):
+    """
+    Generate motion tokens from a text prompt.
+    
+    Args:
+        prompt: Text description of desired motion
+        stage: Which training stage model to use (1, 2, or 3)
+        pid: Optional participant ID for personalization
+        output_file: Optional file to save output tokens
+        per_prompt_vocab: Whether to use per-prompt vocabulary constraints
+        device: Device to run inference on
+    
+    Returns:
+        Generated motion token string
+    """
+    if device is None:
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    
+    print("="*60)
+    print(f"Motion Generation Inference - Stage {stage}")
+    print("="*60)
+    print(f"Prompt: '{prompt}'")
+    print(f"Device: {device}")
+    
+    # Load model and dataset
+    model, tokenizer, motion_token_ids, mot_begin_id, mot_end_id, raw_ds = load_trained_model(stage, device)
+    
+    # Compute length stats and prompt vocab
+    print("\nComputing dataset statistics...")
+    length_stats_by_text, global_median_len = compute_length_stats(raw_ds)
+    prompt_vocab = build_prompt_vocab(raw_ds)
+    has_pid = check_has_participant_id(raw_ds)
+    
+    # Generate motion tokens
+    print(f"\nGenerating motion for: '{prompt}'")
+    print(f"Per-prompt vocabulary: {per_prompt_vocab}")
+    
+    generated = generate_t2m(
+        model=model,
+        tokenizer=tokenizer,
+        prompt_text=prompt,
+        mot_begin_id=mot_begin_id,
+        mot_end_id=mot_end_id,
+        motion_token_ids=motion_token_ids,
+        length_stats_by_text=length_stats_by_text,
+        global_median_len=global_median_len,
+        prompt_vocab=prompt_vocab,
+        has_pid=has_pid,
+        per_prompt_vocab=per_prompt_vocab,
+        pid=pid
+    )
+    
+    print("\n" + "="*60)
+    print("Generated Motion:")
+    print("="*60)
+    print(generated)
+    print("="*60)
+    
+    # Optionally save to file
+    if output_file:
+        output_path = Path(output_file)
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(output_path, 'w') as f:
+            f.write(generated)
+        print(f"\n✅ Output saved to: {output_file}")
+    
+    return generated
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Generate motions from text prompts")
-    parser.add_argument(
-        "--model_path",
-        type=str,
-        required=True,
-        help="Path to trained model (local directory or HF hub)"
-    )
-    parser.add_argument(
-        "--dataset_path",
-        type=str,
-        required=True,
-        help="Path to training dataset JSON"
+    parser = argparse.ArgumentParser(
+        description="Generate motion tokens from text prompts using trained SignMotionGPT model"
     )
     parser.add_argument(
         "--prompt",
         type=str,
-        help="Text prompt for motion generation"
+        required=True,
+        help="Text description of the desired motion (e.g., 'walking forward', 'dancing')"
     )
     parser.add_argument(
-        "--prompts_file",
-        type=str,
-        help="Path to text file with one prompt per line"
+        "--stage",
+        type=int,
+        default=3,
+        choices=[1, 2, 3],
+        help="Which training stage model to use (1=motion-only, 2=multi-task, 3=T2M SFT, default=3)"
     )
     parser.add_argument(
-        "--participant_id",
+        "--pid",
         type=str,
         default=None,
-        help="Optional participant ID for personalized generation"
+        help="Optional participant ID for personalized generation (e.g., 'P40')"
     )
     parser.add_argument(
         "--output",
         type=str,
         default=None,
-        help="Output file to save results (default: print to stdout)"
+        help="Optional output file to save generated tokens"
     )
     parser.add_argument(
-        "--max_new_tokens",
-        type=int,
-        default=256,
-        help="Maximum tokens to generate"
-    )
-    parser.add_argument(
-        "--no_prompt_vocab",
+        "--no-per-prompt-vocab",
         action="store_true",
-        help="Disable per-prompt vocabulary restriction"
+        help="Disable per-prompt vocabulary constraints (allows all motion tokens)"
     )
     parser.add_argument(
         "--device",
         type=str,
-        default="cuda:0",
-        help="Device to run inference on"
+        default=None,
+        choices=["cpu", "cuda", "cuda:0", "cuda:1"],
+        help="Device to run inference on (default: auto-detect)"
     )
     
     args = parser.parse_args()
     
-    # Initialize generator
-    generator = MotionGenerator(
-        model_path=args.model_path,
-        dataset_path=args.dataset_path,
-        device=args.device
+    # Setup device
+    if args.device:
+        device = torch.device(args.device)
+    else:
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    
+    # Run inference
+    inference(
+        prompt=args.prompt,
+        stage=args.stage,
+        pid=args.pid,
+        output_file=args.output,
+        per_prompt_vocab=not args.no_per_prompt_vocab,
+        device=device
     )
-    
-    # Collect prompts
-    prompts = []
-    if args.prompt:
-        prompts.append(args.prompt)
-    if args.prompts_file:
-        with open(args.prompts_file, "r") as f:
-            prompts.extend([line.strip() for line in f if line.strip()])
-    
-    if not prompts:
-        print("Error: Please provide --prompt or --prompts_file")
-        return
-    
-    # Generate
-    print(f"\nGenerating motions for {len(prompts)} prompt(s)...\n")
-    results = []
-    
-    for i, prompt in enumerate(prompts, 1):
-        print(f"[{i}/{len(prompts)}] Prompt: {prompt}")
-        
-        motion_tokens = generator.generate(
-            prompt=prompt,
-            participant_id=args.participant_id,
-            max_new_tokens=args.max_new_tokens,
-            per_prompt_vocab=not args.no_prompt_vocab
-        )
-        
-        print(f"Generated: {motion_tokens}\n")
-        results.append({
-            "prompt": prompt,
-            "motion_tokens": motion_tokens
-        })
-    
-    # Save results
-    if args.output:
-        with open(args.output, "w") as f:
-            json.dump(results, f, indent=2)
-        print(f"✓ Results saved to {args.output}")
-    
-    print("Done!")
 
 
 if __name__ == "__main__":

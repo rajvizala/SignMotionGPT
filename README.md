@@ -261,29 +261,130 @@ The model uses a custom `LengthAwareMotionLogitsProcessor` that:
 - **Edit Distance**: Token-level Levenshtein distance to references
 - **Length Accuracy**: How well generated lengths match training distribution
 
+## Inference & Generation
+
+After training all 3 stages, generate motion tokens from any text prompt:
+
+```bash
+# Basic usage (uses Stage 3 model by default)
+python inference.py --prompt "walking forward"
+
+# Choose a specific stage
+python inference.py --prompt "dancing" --stage 2
+
+# Save output to file
+python inference.py --prompt "jumping" --stage 3 --output motion_tokens.txt
+
+# Generate with participant ID (if dataset has PIDs)
+python inference.py --prompt "yoga" --pid P40 --stage 3
+```
+
+### Inference Options
+
+- `--prompt`: Text description of desired motion (required)
+- `--stage`: Model stage to use (1, 2, or 3; default: 3)
+- `--pid`: Optional participant ID for personalized generation
+- `--output`: Save generated tokens to file
+- `--no-per-prompt-vocab`: Allow all motion tokens (not just those seen with prompt)
+- `--device`: Device to run on (cpu, cuda, cuda:0, etc.)
+
+---
+
+## Visualization
+
+Convert generated motion tokens to 3D SMPL-X animation:
+
+### Setup Visualization Assets
+
+Edit `setup_env.sh` and add Google Drive IDs for:
+```bash
+VQVAE_MODEL_ID="your_vqvae_checkpoint_id"
+VQVAE_STATS_ID="your_stats_file_id"
+SMPLX_MODELS_ID="your_smplx_models_zip_id"
+```
+
+Or manually set paths via environment variables:
+```bash
+export VQVAE_CHECKPOINT=/path/to/vqvae_model.pt
+export VQVAE_STATS_PATH=/path/to/vqvae_stats.pt
+export SMPLX_MODEL_DIR=/path/to/smplx_models
+```
+
+### Usage
+
+```bash
+# Visualize from token string
+python visualize.py --tokens "<MOT_BEGIN><motion_177><motion_135>...<MOT_END>"
+
+# Visualize from saved file
+python visualize.py --input motion_tokens.txt
+
+# Generate and visualize in one command
+python visualize.py --prompt "walking" --stage 3
+
+# Custom output path
+python visualize.py --tokens "..." --output my_animation.html --fps 30
+```
+
+### Visualization Options
+
+- `--tokens`: Motion token string (direct input)
+- `--input`: Path to file with motion tokens
+- `--prompt`: Generate tokens first, then visualize (requires `--stage`)
+- `--stage`: Stage model for generation (if using `--prompt`)
+- `--vqvae-ckpt`: Path to VQ-VAE checkpoint
+- `--stats`: Path to normalization stats
+- `--smplx-dir`: Path to SMPL-X model directory
+- `--output`: HTML file to save animation
+- `--title`: Animation title
+- `--fps`: Frames per second (default: 20)
+
+The visualization pipeline:
+1. **Parse tokens** from string or file
+2. **Decode via VQ-VAE** to SMPL-X parameters (182-dim per frame)
+3. **Run SMPL-X model** to get 3D vertices
+4. **Generate interactive HTML** with Plotly (rotate, zoom, play/pause)
+
+---
+
 ## Advanced Usage
 
 ### Custom Participant ID
 
-Generate motions for specific participants:
+Generate motions for specific participants (if dataset has participant IDs):
 
-```python
-motion_tokens = generator.generate(
-    prompt="walking forward",
-    participant_id="P001"
-)
+```bash
+python inference.py --prompt "walking forward" --pid P001 --stage 3
 ```
 
 ### Adjust Generation Parameters
 
+Edit `config.py` to change generation behavior:
 ```python
-motion_tokens = generator.generate(
-    prompt="dancing",
-    max_new_tokens=512,
-    temperature=0.8,
-    per_prompt_vocab=True  # Restrict to tokens seen with this prompt
-)
+GEN_TEMPERATURE = 0.7      # Sampling temperature (higher = more random)
+GEN_TOP_P = 0.9            # Nucleus sampling threshold
+GEN_REPETITION_PENALTY = 1.2  # Discourage repetition
+GEN_END_LOGIT_SLOPE = 0.25    # Bias toward expected length
 ```
 
+### Custom Visualization Paths
+
+```bash
+# Use local models
+python visualize.py \
+  --tokens "<MOT_BEGIN>..." \
+  --vqvae-ckpt /custom/path/vqvae.pt \
+  --stats /custom/path/stats.pt \
+  --smplx-dir /custom/smplx \
+  --output custom_vis.html \
+  --fps 25 \
+  --title "My Custom Motion"
+```
+
+---
+
+## Acknowledgments
+
 - Built with [Unsloth](https://github.com/unslothai/unsloth) for efficient LLM training
-- Inspired by MotionGPT and related motion generation work
+- Inspired by [MotionGPT](https://github.com/OpenMotionLab/MotionGPT) and related motion generation work
+- Uses [SMPL-X](https://smpl-x.is.tue.mpg.de/) for human body modeling
