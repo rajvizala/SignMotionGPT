@@ -41,7 +41,7 @@ from datasets import Dataset
 
 # Overfitting test config
 NUM_WORDS = 50
-TARGET_WORD = "passport"  # Must include this word
+TARGET_WORD = "passport"  # Must include this word (use a word that exists in dataset)
 OUT_DIR = os.path.join(WORK_DIR, "overfit_test")
 EPOCHS_PER_STAGE = 50  # High number, rely on early stopping
 EARLY_STOP_LOSS = 0.1  # Stop when eval loss drops below this
@@ -66,48 +66,56 @@ class EarlyStoppingCallback(TrainerCallback):
         return control
 
 
-def create_small_dataset(raw_ds, num_words=50, target_word="passport"):
+def create_small_dataset(raw_ds, num_words=50, target_word="witch"):
     """
-    Create a small dataset with only num_words unique prompts.
+    Create a small dataset with only num_words unique words.
     Ensures target_word is included.
+    Groups by the 'word' field (not 'text_query' which has variations).
     """
     print(f"\nCreating small dataset with {num_words} words (including '{target_word}')...")
     
-    # Group by text_query
-    by_text = defaultdict(list)
+    # Group by 'word' field (the actual word being signed)
+    by_word = defaultdict(list)
     for ex in raw_ds:
-        by_text[ex["text_query"]].append(ex)
+        word = ex.get("word", ex["text_query"])  # Fallback to text_query if no 'word' field
+        by_word[word].append(ex)
     
-    # Get unique prompts
-    all_prompts = list(by_text.keys())
-    print(f"Total unique prompts in dataset: {len(all_prompts)}")
+    # Get unique words
+    all_words = list(by_word.keys())
+    print(f"Total unique words in dataset: {len(all_words)}")
     
     # Ensure target_word is in the selection
-    selected_prompts = []
-    if target_word in by_text:
-        selected_prompts.append(target_word)
-        print(f"✅ Target word '{target_word}' found with {len(by_text[target_word])} samples")
+    selected_words = []
+    if target_word in by_word:
+        selected_words.append(target_word)
+        print(f"✅ Target word '{target_word}' found with {len(by_word[target_word])} samples")
     else:
         print(f"⚠️  Target word '{target_word}' not found in dataset!")
+        print(f"   Available words sample: {list(all_words)[:20]}")
+        # Pick first available word as fallback
+        if all_words:
+            target_word = all_words[0]
+            selected_words.append(target_word)
+            print(f"   Using fallback word: '{target_word}'")
     
-    # Randomly select remaining prompts
-    remaining = [p for p in all_prompts if p != target_word]
+    # Randomly select remaining words
+    remaining = [w for w in all_words if w != target_word]
     random.shuffle(remaining)
-    selected_prompts.extend(remaining[:num_words - len(selected_prompts)])
+    selected_words.extend(remaining[:num_words - len(selected_words)])
     
-    print(f"Selected {len(selected_prompts)} prompts")
+    print(f"Selected {len(selected_words)} words")
     
-    # Collect all samples for selected prompts
+    # Collect all samples for selected words
     small_samples = []
-    for prompt in selected_prompts:
-        small_samples.extend(by_text[prompt])
+    for word in selected_words:
+        small_samples.extend(by_word[word])
     
     print(f"Total samples in small dataset: {len(small_samples)}")
     print(f"Sample distribution:")
-    for prompt in selected_prompts[:10]:  # Show first 10
-        print(f"  - '{prompt}': {len(by_text[prompt])} samples")
-    if len(selected_prompts) > 10:
-        print(f"  ... and {len(selected_prompts) - 10} more prompts")
+    for word in selected_words[:10]:  # Show first 10
+        print(f"  - '{word}': {len(by_word[word])} samples")
+    if len(selected_words) > 10:
+        print(f"  ... and {len(selected_words) - 10} more words")
     
     return Dataset.from_list(small_samples)
 
