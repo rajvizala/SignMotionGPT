@@ -140,7 +140,7 @@ def train_stage_with_early_stop(
     args.eval_steps = 50  # Evaluate less frequently (was 20, too often for small dataset)
     args.logging_steps = 20
     args.save_steps = 10000  # Don't save intermediate checkpoints
-    args.per_device_train_batch_size = 32  # Increase from 16 for faster training
+    args.per_device_train_batch_size = 8  # Increase from 16 for faster training
     args.gradient_accumulation_steps = 4  # Reduce from 8 to keep effective batch=128
     
     trainer = Trainer(
