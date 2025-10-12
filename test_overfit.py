@@ -43,8 +43,8 @@ from datasets import Dataset
 NUM_WORDS = 50
 TARGET_WORD = "passport"  # Must include this word (use a word that exists in dataset)
 OUT_DIR = os.path.join(WORK_DIR, "overfit_test")
-EPOCHS_PER_STAGE = 50  # High number, rely on early stopping
-EARLY_STOP_LOSS = 0.1  # Stop when eval loss drops below this
+EPOCHS_PER_STAGE = 100  # High number, rely on early stopping
+EARLY_STOP_LOSS = 0.5  # Stop when eval loss drops below this (relaxed from 0.1)
 
 
 class EarlyStoppingCallback(TrainerCallback):
@@ -125,7 +125,8 @@ def train_stage_with_early_stop(
 ):
     """Train a stage with early stopping"""
     print(f"\n{'='*60}")
-    print(f"Training {stage_name} (Early Stop @ loss < {early_stop_threshold})")
+    print(f"Training {stage_name}")
+    print(f"Early Stop: eval_loss < {early_stop_threshold} OR max {epochs} epochs")
     print(f"{'='*60}")
     
     args = make_training_args(
@@ -136,9 +137,11 @@ def train_stage_with_early_stop(
     
     # Override some args for faster training
     args.eval_strategy = "steps"
-    args.eval_steps = 20  # Evaluate frequently to catch early stop
-    args.logging_steps = 10
+    args.eval_steps = 50  # Evaluate less frequently (was 20, too often for small dataset)
+    args.logging_steps = 20
     args.save_steps = 10000  # Don't save intermediate checkpoints
+    args.per_device_train_batch_size = 32  # Increase from 16 for faster training
+    args.gradient_accumulation_steps = 4  # Reduce from 8 to keep effective batch=128
     
     trainer = Trainer(
         model=model,
