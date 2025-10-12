@@ -1,17 +1,4 @@
-## SignMotionGPT — LLM Fine‑tuning (Colab & Kaggle)
 
-This repo contains utilities to fine‑tune the LLM component in three stages with resilient checkpointing to the Hugging Face Hub. Training can start in Colab and resume in Kaggle (or vice‑versa) without losing progress.
-
-### What’s included
-- Two‑point Hub checkpointing (halfway and final) with auto‑resume
-- Per‑stage Hub repos (defaults):
-  - `rdz-falcon/signmotiongpt-stage1`
-  - `rdz-falcon/signmotiongpt-stage2`
-  - `rdz-falcon/signmotiongpt-stage3`
-- Dynamic `WORK_DIR` and dataset path defaults to the current directory
-- Setup script to install dependencies and (optionally) download a dataset from a public Google Drive link
-
----
 
 ### 1) Configure setup script (one time)
 
@@ -32,20 +19,7 @@ export WORK_DIR=/path/to/workdir
 export DATA_JSON_PATH=/path/to/motion_llm_dataset.json
 ```
 
----
 
-### 2) Configuration
-All key settings live in `config.py`:
-- `WORK_DIR`, `DATA_DIR`, `DATA_JSON_PATH` (defaults to current working dir)
-- Hub:
-  - `HF_USER` (defaults to `rdz-falcon`)
-  - `HF_TOKEN` (auto‑read from `HUGGINGFACE_HUB_TOKEN` env)
-  - `HUB_REPO_S1`, `HUB_REPO_S2`, `HUB_REPO_S3`
-- Training hyperparameters and stage output directories (`OUT_S1`, `OUT_S2`, `OUT_S3`)
-
-Ensure Kaggle has Internet enabled when training. If you embed your token in the script, avoid committing secrets publicly.
-
----
 
 ## Overview
 
@@ -53,24 +27,6 @@ This repository implements a multi-stage training approach for motion generation
 - **Stage 1**: Motion-only Language Model (MLM) - Model learns motion token distributions
 - **Stage 2**: Multi-task Pretraining - Text-to-Motion (T2M), Motion-to-Text (M2T), and Denoising
 - **Stage 3**: Supervised Fine-Tuning (SFT) - Final T2M refinement
-
-## Repository Structure
-
-```
-motion-llm/
-├── config.py              # Configuration and hyperparameters
-├── data.py                # Dataset loading and preprocessing
-├── model.py               # Model initialization with custom tokens
-├── templates.py           # Prompt templates for each stage
-├── collators.py           # Data collators with label masking
-├── generate.py            # Generation with constrained decoding
-├── metrics.py             # Evaluation metrics
-├── train.py               # Training utilities
-├── train_pipeline.py      # Main training script
-├── inference.py           # Standalone inference script
-├── requirements.txt       # Dependencies
-└── README.md             # This file
-```
 
 ## Installation
 
@@ -235,45 +191,4 @@ python visualize.py --prompt "walking" --stage 3
 
 # Custom output path
 python visualize.py --tokens "..." --output my_animation.html --fps 30
-```
-
-### Visualization Options
-
-- `--tokens`: Motion token string (direct input)
-- `--input`: Path to file with motion tokens
-- `--prompt`: Generate tokens first, then visualize (requires `--stage`)
-- `--stage`: Stage model for generation (if using `--prompt`)
-- `--vqvae-ckpt`: Path to VQ-VAE checkpoint
-- `--stats`: Path to normalization stats
-- `--smplx-dir`: Path to SMPL-X model directory
-- `--output`: HTML file to save animation
-- `--title`: Animation title
-- `--fps`: Frames per second (default: 20)
-
-The visualization pipeline:
-1. **Parse tokens** from string or file
-2. **Decode via VQ-VAE** to SMPL-X parameters (182-dim per frame)
-3. **Run SMPL-X model** to get 3D vertices
-4. **Generate interactive HTML** with Plotly (rotate, zoom, play/pause)
-
----
-
-## Advanced Usage
-
-### Custom Participant ID
-
-Generate motions for specific participants (if dataset has participant IDs):
-
-```bash
-python inference.py --prompt "walking forward" --pid P001 --stage 3
-```
-
-### Adjust Generation Parameters
-
-Edit `config.py` to change generation behavior:
-```python
-GEN_TEMPERATURE = 0.7      # Sampling temperature (higher = more random)
-GEN_TOP_P = 0.9            # Nucleus sampling threshold
-GEN_REPETITION_PENALTY = 1.2  # Discourage repetition
-GEN_END_LOGIT_SLOPE = 0.25    # Bias toward expected length
 ```
