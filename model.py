@@ -45,7 +45,7 @@ def setup_model_and_tokenizer(codebook_size: int, unique_pids: List[str] = None)
         model_name=MODEL_NAME,
         max_seq_length=MAX_SEQ_LEN,
         dtype=DTYPE,
-        load_in_4bit=True,
+        load_in_4bit=False,
         trust_remote_code=True,
     )
     

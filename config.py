@@ -31,16 +31,16 @@ DTYPE = torch.bfloat16 if torch.cuda.is_available() and torch.cuda.get_device_ca
 BATCH_TRAIN = 8
 BATCH_EVAL = 8
 GRAD_ACCUM = 8
-LR = 1e-5
-WARMUP = 0.1
+LR = 5e-5
+WARMUP = 0.03
 LOG_STEPS = 20
 EVAL_STEPS = 100
 SAVE_STEPS = 500
 
 # Epochs per stage
-EPOCHS_S1 = 3
-EPOCHS_S2 = 2
-EPOCHS_S3 = 3
+EPOCHS_S1 = 5
+EPOCHS_S2 = 5
+EPOCHS_S3 = 5
 
 # Sampling limits (None = use all data)
 MAX_TRAIN_SAMPLES_S1 = None

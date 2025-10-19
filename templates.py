@@ -21,19 +21,22 @@ def pid_token_from_example(ex, has_pid: bool):
 
 def map_stage1(ex, has_pid: bool):
     """
-    Stage 1: Motion-only LM
-    Assistant predicts motion span with no text prompt
+    Stage 1: Word + optional PID conditioning to learn motion language.
+    The user explicitly provides the word (+PID); assistant outputs motion span.
     """
     mot = ids_to_motion_specials(ex["motion_tokens"])
     assistant = f"<MOT_BEGIN> {mot} <MOT_END>"
     pid_tok = pid_token_from_example(ex, has_pid)
-    
+    word = ex.get("word", ex.get("text_query", ""))
+
+    # Word + PID conditioning (no natural language chatter to keep it compact)
+    user = f"<T2M>{pid_tok}\nword: {word}"
     text = (
         "<|im_start|>system\n" + SYSTEM_MSG + "<|im_end|>\n"
-        + "<|im_start|>user\n" + f"<T2M>{pid_tok}\n\n" + "<|im_end|>\n"
+        + "<|im_start|>user\n" + user + "\n<|im_end|>\n"
         + "<|im_start|>assistant\n" + assistant + "\n<|im_end|>\n"
     )
-    
+
     return {"text": text, "where": "mot"}
 
 
@@ -93,20 +96,21 @@ def map_stage2(ex, has_pid: bool):
 
 def map_stage3(ex, has_pid: bool):
     """
-    Stage 3: T2M SFT (Supervised Fine-Tuning)
-    Standard text-to-motion generation
+    Stage 3 (Instruct): Word-only request, no participant ID.
+    The system prompt directs: "Output motion tokens for the given word".
     """
     t = ex["text_query"]
     mot = ids_to_motion_specials(ex["motion_tokens"])
     assistant = f"<MOT_BEGIN> {mot} <MOT_END>"
-    pid_tok = pid_token_from_example(ex, has_pid)
-    
+
+    # Instruct-style, no PID
+    user = f"<T2M>\nword: {t}"
     text = (
         "<|im_start|>system\n" + SYSTEM_MSG + "<|im_end|>\n"
-        + "<|im_start|>user\n" + f"<T2M>{pid_tok}\n\n" + t + "\n<|im_end|>\n"
+        + "<|im_start|>user\n" + user + "\n<|im_end|>\n"
         + "<|im_start|>assistant\n" + assistant + "\n<|im_end|>\n"
     )
-    
+
     return {
         "text": text,
         "where": "mot",

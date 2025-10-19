@@ -38,7 +38,7 @@ def make_training_args(out_dir: str, epochs: int, two_point_hub: bool = False) -
         bf16=(DTYPE == torch.bfloat16),
         fp16=(DTYPE == torch.float16),
         lr_scheduler_type="cosine",
-        optim="paged_adamw_8bit",
+        optim="adamw_torch",
         report_to="none",
         seed=SEED,
         remove_unused_columns=False,
@@ -211,6 +211,24 @@ def train_stage(
         args=args,
         data_collator=data_collator,
     )
+
+    # Train-loss early stop (match test_overfit behavior)
+    class TrainLossStopCallback(TrainerCallback):
+        def __init__(self, threshold: float = 1.0):
+            self.threshold = float(threshold)
+            self.triggered = False
+
+        def on_log(self, args, state, control, logs=None, **kwargs):
+            if logs is None:
+                return control
+            loss = logs.get("loss")
+            if loss is not None and loss < self.threshold and state.global_step > 0 and not self.triggered:
+                self.triggered = True
+                print(f"\nTrain-loss early stop: loss={loss:.4f} < {self.threshold}")
+                control.should_training_stop = True
+            return control
+
+    trainer.add_callback(TrainLossStopCallback(threshold=1.0))
     
     # Add two-point Hub checkpoint uploader if configured
     if hub_repo:
