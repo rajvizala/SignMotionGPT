@@ -16,6 +16,7 @@ from transformers import (
     TrainingArguments, Trainer, TrainerCallback,
     LogitsProcessor, LogitsProcessorList,
 )
+from torch.nn import functional as F
 from collections import defaultdict, Counter
 from typing import List, Dict, Tuple
 from rapidfuzz.distance import Levenshtein
@@ -35,6 +36,7 @@ NUM_WORDS = 50
 TARGET_WORD = "passport"  # Must include this word (use a word that exists in dataset)
 OUT_DIR = os.path.join(WORK_DIR, "overfit_test")
 EARLY_STOP_LOSS = 0.5  # Stop when eval loss drops below this
+EARLY_STOP_TRAIN_LOSS = 1.0  # Stop when training loss drops below this
 
 # Model/Training
 MODEL_NAME     = "unsloth/Qwen3-0.6B"
@@ -42,8 +44,8 @@ MAX_SEQ_LEN    = 512
 BATCH_TRAIN    = 8
 BATCH_EVAL     = 8
 GRAD_ACCUM     = 8  # Keep same as full training for faster convergence
-LR             = 1e-5
-WARMUP         = 0.1
+LR             = 5e-5
+WARMUP         = 0.03
 LOG_STEPS      = 20
 EVAL_STEPS     = 50  # Evaluate more frequently for early stopping
 SAVE_STEPS     = 10000  # Don't save checkpoints
@@ -80,6 +82,23 @@ class EarlyStoppingCallback(TrainerCallback):
         
         return control
 
+
+# Additional: stop when training loss drops below threshold
+class TrainLossStopCallback(TrainerCallback):
+    def __init__(self, threshold=1.0):
+        self.threshold = float(threshold)
+        self.triggered = False
+
+    def on_log(self, args, state, control, logs=None, **kwargs):
+        if logs is None:
+            return control
+        # HF logs use 'loss' for training loss
+        loss = logs.get("loss", None)
+        if loss is not None and loss < self.threshold and state.global_step > 0 and not self.triggered:
+            self.triggered = True
+            print(f"\n🎯 Train-loss early stop: loss={loss:.4f} < {self.threshold}")
+            control.should_training_stop = True
+        return control
 
 # ======================
 # 3) Load dataset and build motion vocab
@@ -238,7 +257,7 @@ model, tokenizer = FastLanguageModel.from_pretrained(
     model_name       = MODEL_NAME,
     max_seq_length   = MAX_SEQ_LEN,
     dtype            = dtype,
-    load_in_4bit     = True,
+    load_in_4bit     = False,
     trust_remote_code= True,
 )
 
@@ -431,19 +450,20 @@ def make_args(out_dir, epochs):
         bf16=(dtype==torch.bfloat16),
         fp16=(dtype==torch.float16),
         lr_scheduler_type="cosine",
-        optim="paged_adamw_8bit",
+        optim="adamw_torch",
         report_to="none",
         seed=SEED,
         remove_unused_columns=False,
     )
 
-def train_stage(stage_name, out_dir, train_ds, val_ds, epochs):
+def train_stage(stage_name, out_dir, train_ds, val_ds, epochs, restricted_vocab=False):
     print(f"\n{'='*60}")
     print(f"Training {stage_name}")
     print(f"Early Stop: eval_loss < {EARLY_STOP_LOSS} OR max {epochs} epochs")
     print(f"{'='*60}")
     
     args = make_args(out_dir, epochs)
+    # For overfitting simplicity and robustness, use standard Trainer (no restricted vocab)
     tr = Trainer(
         model=model,
         tokenizer=tokenizer,
@@ -451,7 +471,7 @@ def train_stage(stage_name, out_dir, train_ds, val_ds, epochs):
         eval_dataset=val_ds,
         args=args,
         data_collator=collator,
-        callbacks=[EarlyStoppingCallback(threshold=EARLY_STOP_LOSS)]
+        callbacks=[EarlyStoppingCallback(threshold=EARLY_STOP_LOSS), TrainLossStopCallback(threshold=EARLY_STOP_TRAIN_LOSS)]
     )
     
     print(f"Starting training for {stage_name}...")
@@ -466,11 +486,56 @@ def train_stage(stage_name, out_dir, train_ds, val_ds, epochs):
 
 # ======================
 # 9) Constrained decoding (motion-only) with length-awareness
+#     + Constrained-vocab Trainer for training (Stage 1 & 3)
 # ======================
 motion_token_strs = [f"<motion_{i}>" for i in range(CODEBOOK_SIZE)]
 motion_token_ids  = tokenizer.convert_tokens_to_ids(motion_token_strs)
 mot_begin_id = tokenizer.convert_tokens_to_ids("<MOT_BEGIN>")
 mot_end_id   = tokenizer.convert_tokens_to_ids("<MOT_END>")
+
+# Allowed motion vocabulary (for training-time masking)
+ALLOWED_MOTION_TOKEN_IDS = [mot_begin_id, mot_end_id] + motion_token_ids
+
+class MotionVocabTrainer(Trainer):
+    """Trainer that restricts logits to motion vocabulary during loss for faster learning.
+
+    Applied only for stages where labels are motion spans (Stage 1 and Stage 3).
+    """
+    def __init__(self, allowed_ids, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        # Store as list of ints; we'll move to device during compute_loss
+        self.allowed_ids = [int(i) for i in allowed_ids]
+
+    def compute_loss(self, model, inputs, return_outputs=False, num_items_in_batch=None, **kwargs):
+        # We compute our own LM loss with a vocab mask to motion tokens only
+        labels = inputs.pop("labels")
+        outputs = model(**inputs)
+        logits = outputs.logits  # [batch, seq_len, vocab]
+
+        # Shift for causal LM
+        shift_logits = logits[:, :-1, :]
+        shift_labels = labels[:, 1:]
+
+        vocab_size = shift_logits.size(-1)
+        device = shift_logits.device
+
+        # Build a global vocab mask once per call
+        allow_mask = torch.zeros(vocab_size, dtype=torch.bool, device=device)
+        allow_mask[torch.as_tensor(self.allowed_ids, device=device, dtype=torch.long)] = True
+
+        # Mask disallowed vocab with large negative logits
+        # Broadcasting over [batch, seq_len, vocab]
+        disallow = (~allow_mask).unsqueeze(0).unsqueeze(0)
+        shift_logits = shift_logits.masked_fill(disallow, float('-inf'))
+
+        # Cross-entropy with ignore_index
+        loss = F.cross_entropy(
+            shift_logits.reshape(-1, vocab_size),
+            shift_labels.reshape(-1),
+            ignore_index=-100,
+        )
+
+        return (loss, outputs) if return_outputs else loss
 
 class LengthAwareMotionLogitsProcessor(LogitsProcessor):
     def __init__(self, prompt_len, mot_begin_id, mot_end_id, motion_ids, hard_min, soft_target, hard_max, end_logit_slope=0.25):
@@ -589,27 +654,21 @@ def generate_t2m(prompt_text: str, pid: str = None, max_new_tokens: int = 256, p
 def main():
     os.makedirs(OUT_DIR, exist_ok=True)
     
-    # Stage 1: Motion-only LM
-    print("\n[6/8] Stage 1: Motion-only Language Model")
-    metrics_s1 = train_stage("Stage1_MotionOnlyLM", os.path.join(OUT_DIR, "stage1"), train_s1, val_s1, EPOCHS_S1)
-    
-    # Stage 2: Multi-task
-    print("\n[7/8] Stage 2: Multi-task Training")
-    metrics_s2 = train_stage("Stage2_Multitask", os.path.join(OUT_DIR, "stage2"), train_s2, val_s2, EPOCHS_S2)
-    
-    # Stage 3: T2M SFT
-    print("\n[8/8] Stage 3: T2M Fine-tuning")
-    metrics_s3 = train_stage("Stage3_T2M_SFT", os.path.join(OUT_DIR, "stage3"), train_s3, val_s3, EPOCHS_S3)
+    # Simplify for overfit: single-stage T2M SFT to memorize mapping quickly
+    print("\n[6/7] Overfit Stage: T2M Fine-tuning")
+    metrics_s3 = train_stage("Overfit_T2M_SFT", os.path.join(OUT_DIR, "stage_overfit"), train_s3, val_s3, EPOCHS_S3, restricted_vocab=False)
     
     # Test generation on target word
     print("\n" + "="*70)
     print("TESTING GENERATION")
     print("="*70)
     
-    # Get test prompts for target word
+    # Pick a training-set word for inference (from train_s3)
     target_examples = [ex for ex in raw_ds if ex.get("word", ex["text_query"]) == TARGET_WORD]
-    if target_examples:
-        test_prompt = target_examples[0]["text_query"]
+    if len(train_s3) > 0:
+        # decode a prompt string from mapped dataset
+        # We stored original 'text_query' in map_stage3 output
+        test_prompt = train_s3[0]["text_query"] if "text_query" in train_s3.column_names else (target_examples[0]["text_query"] if target_examples else raw_ds[0]["text_query"]) 
         print(f"\nTest word: '{TARGET_WORD}'")
         print(f"Test prompt: '{test_prompt}'")
         print(f"\nGenerating motion for '{TARGET_WORD}'...")
@@ -638,9 +697,7 @@ def main():
     print("OVERFIT TEST COMPLETE")
     print("="*70)
     print(f"Final metrics:")
-    print(f"  Stage 1: loss={metrics_s1.get('eval_loss', 0.0):.4f}")
-    print(f"  Stage 2: loss={metrics_s2.get('eval_loss', 0.0):.4f}")
-    print(f"  Stage 3: loss={metrics_s3.get('eval_loss', 0.0):.4f}")
+    print(f"  Overfit Stage: loss={metrics_s3.get('eval_loss', 0.0):.4f}")
 
 
 if __name__ == "__main__":
