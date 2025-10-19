@@ -49,12 +49,10 @@ if [[ -n "$VQVAE_STATS_ID" ]] && [[ "$VQVAE_STATS_ID" != "YOUR_VQVAE_STATS_GDRIV
 fi
 
 if [[ -n "$SMPLX_MODELS_ID" ]] && [[ "$SMPLX_MODELS_ID" != "YOUR_SMPLX_MODELS_GDRIVE_ID_HERE" ]]; then
-  echo "Downloading SMPL-X models from Google Drive (file id: $SMPLX_MODELS_ID)..."
+  echo "Downloading SMPL-X neutral model (.npz) from Google Drive (file id: $SMPLX_MODELS_ID)..."
   mkdir -p "$DATA_DIR/smplx_models"
-  gdown --id "$SMPLX_MODELS_ID" -O "$DATA_DIR/smplx_models.zip"
-  unzip -q "$DATA_DIR/smplx_models.zip" -d "$DATA_DIR/smplx_models"
-  rm "$DATA_DIR/smplx_models.zip"
-  echo "SMPL-X models extracted to $DATA_DIR/smplx_models"
+  gdown --id "$SMPLX_MODELS_ID" -O "$DATA_DIR/smplx_models/SMPLX_NEUTRAL.npz"
+  echo "Saved SMPLX_NEUTRAL.npz to $DATA_DIR/smplx_models"
 fi
 
 if [[ -n "$HF_TOKEN_IN" ]]; then
