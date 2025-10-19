@@ -23,7 +23,7 @@ OUT_S2 = f"{WORK_DIR}/stage2_multitask"
 OUT_S3 = f"{WORK_DIR}/stage3_t2m_sft"
 
 # Model configuration
-MODEL_NAME = "unsloth/Qwen3-1.7B"  # or "unsloth/gemma-3-1b-it"
+MODEL_NAME = "unsloth/Qwen3-0.6B"  # or "unsloth/gemma-3-1b-it"
 MAX_SEQ_LEN = 512
 DTYPE = torch.bfloat16 if torch.cuda.is_available() and torch.cuda.get_device_capability(0)[0] >= 8 else torch.float16
 
