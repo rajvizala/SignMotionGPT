@@ -90,7 +90,7 @@ def make_splits(dataset: Dataset, mapper_fn, max_train_samples=None) -> Tuple[Da
     """
     Create train/val splits and apply mapping function
     """
-    split = dataset.train_test_split(test_size=0.01, seed=SEED)
+    split = dataset.train_test_split(test_size=0.1, seed=SEED)
     
     if max_train_samples is not None and max_train_samples < len(split["train"]):
         split["train"] = split["train"].select(range(max_train_samples))
