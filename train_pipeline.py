@@ -1,274 +1,145 @@
 """
-Main training pipeline for Motion LLM
-Run this script to execute the full 3-stage training process
+Wrapper around the `test_overfit` training stack so the main training entrypoint
+(`train_pipeline.py`) matches the behaviour of the proven end-to-end script.
 """
+
+import argparse
 import os
-import random
-import torch
-import warnings
-from collections import defaultdict
+from typing import Any, Dict, List, Optional
 
-# Set seeds
-from config import SEED
-random.seed(SEED)
-torch.manual_seed(SEED)
-if torch.cuda.is_available():
-    torch.cuda.manual_seed_all(SEED)
-
-# Suppress warnings
-warnings.filterwarnings("ignore")
-
-# Import modules
 from config import (
-    DATA_JSON_PATH, OUT_S1, OUT_S2, OUT_S3,
-    EPOCHS_S1, EPOCHS_S2, EPOCHS_S3,
-    MAX_TRAIN_SAMPLES_S1, MAX_TRAIN_SAMPLES_S2, MAX_TRAIN_SAMPLES_S3,
-    MAX_SEQ_LEN
+    DATA_JSON_PATH,
+    WORK_DIR,
+    PIPELINE_MODEL_NAME,
+    PIPELINE_OUTPUT_DIR,
+    PIPELINE_EVAL_WORDS,
+    PIPELINE_EVAL_SAMPLE_LIMIT,
+    PIPELINE_RUN_EVALS_ONLY,
+    PIPELINE_S1_EPOCHS,
+    PIPELINE_S2_EPOCHS,
+    PIPELINE_S1_LR,
+    PIPELINE_S2_LR,
+    PIPELINE_S1_BATCH,
+    PIPELINE_S2_BATCH,
+    PIPELINE_HF_STAGE2_SUBDIR,
+    PIPELINE_FORCE_STAGE2_FROM_STAGE1,
+    HF_TOKEN,
+    HUB_REPO_S1,
+    HUB_REPO_S2,
 )
-from data import (
-    load_dataset, build_motion_vocab, compute_length_stats,
-    build_prompt_vocab, make_splits, check_has_participant_id
-)
-from model import setup_model_and_tokenizer, get_motion_token_info
-from templates import create_mapper
-from collators import AssistantSpanCollator
-from train import train_stage
-from generate import generate_t2m
-from metrics import eval_t2m_set, build_text_to_refs
+
+import test_overfit
+
+DEFAULT_OUTPUT_DIR = PIPELINE_OUTPUT_DIR or os.path.join(WORK_DIR, "motion_gpt_full_model")
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="Run the SignMotionGPT pipeline using the tested two-stage training flow.",
+    )
+    parser.add_argument("--dataset-path", type=str, default=None, help="Path to motion_llm_dataset.json")
+    parser.add_argument("--output-dir", type=str, default=None, help="Directory for checkpoints, metrics, and final model")
+    parser.add_argument("--model-name", type=str, default=None, help="Base HF model to fine-tune")
+    parser.add_argument("--eval-words", nargs="+", default=None, help="Override evaluation word list")
+    parser.add_argument("--eval-sample-limit", type=int, default=None, help="Max samples for encoder metrics")
+    parser.add_argument("--evals-only", action="store_true", help="Skip inference logs/visuals and only compute metrics")
+    parser.add_argument("--full-train", action="store_true", help="Force full training even if eval-only flag is set via env/config")
+    parser.add_argument("--s1-epochs", type=int, default=None, help="Stage 1 epochs override")
+    parser.add_argument("--s2-epochs", type=int, default=None, help="Stage 2 epochs override")
+    parser.add_argument("--s1-lr", type=float, default=None, help="Stage 1 learning rate override")
+    parser.add_argument("--s2-lr", type=float, default=None, help="Stage 2 learning rate override")
+    parser.add_argument("--s1-batch-size", type=int, default=None, help="Stage 1 batch size override")
+    parser.add_argument("--s2-batch-size", type=int, default=None, help="Stage 2 batch size override")
+    parser.add_argument("--checkpoint-upload-interval", type=int, default=None, help="HF upload cadence in epochs")
+    parser.add_argument("--hf-stage1-repo", type=str, default=None, help="HF repo id for Stage 1 checkpoints")
+    parser.add_argument("--hf-stage2-repo", type=str, default=None, help="HF repo id for Stage 2 checkpoints")
+    parser.add_argument("--stage2-subdir", type=str, default=None, help="Subfolder name for Stage 2 checkpoints on HF")
+    parser.add_argument("--force-stage2-from-stage1", action="store_true", help="Always restart Stage 2 from Stage 1 weights")
+    parser.add_argument("--allow-stage2-resume", action="store_true", help="Permit Stage 2 to resume from Hub checkpoints")
+    parser.add_argument("--hf-token", type=str, default=None, help="Explicit HF token (otherwise env/config is used)")
+    parser.add_argument("--no-hub", action="store_true", help="Disable Hugging Face Hub syncing entirely")
+    parser.add_argument("--show-hub-progress", action="store_true", help="Re-enable HF progress bars")
+    return parser.parse_args()
+
+
+def _clean_eval_words(words: Optional[List[str]]) -> Optional[List[str]]:
+    if not words:
+        return None
+    cleaned = [w.strip() for w in words if w and w.strip()]
+    return cleaned or None
+
+
+def _resolve_token(cli_token: Optional[str]) -> Optional[str]:
+    env_token = os.environ.get("hf_auth_token") or os.environ.get("HUGGINGFACE_HUB_TOKEN")
+    return cli_token or env_token or (HF_TOKEN if HF_TOKEN else None)
+
+
+def build_overrides(args: argparse.Namespace) -> Dict[str, Any]:
+    overrides: Dict[str, Any] = {}
+
+    overrides["DATASET_PATH"] = args.dataset_path or DATA_JSON_PATH
+    overrides["OUTPUT_DIR"] = args.output_dir or DEFAULT_OUTPUT_DIR
+    overrides["MODEL_NAME"] = args.model_name or PIPELINE_MODEL_NAME or test_overfit.MODEL_NAME
+
+    eval_words = _clean_eval_words(args.eval_words) or PIPELINE_EVAL_WORDS
+    if eval_words:
+        overrides["EVALUATION_WORDS"] = eval_words
+
+    overrides["EVAL_SAMPLE_LIMIT"] = args.eval_sample_limit or PIPELINE_EVAL_SAMPLE_LIMIT
+
+    run_evals_only = PIPELINE_RUN_EVALS_ONLY
+    if args.evals_only:
+        run_evals_only = True
+    if args.full_train:
+        run_evals_only = False
+    overrides["RUN_EVALS_ONLY"] = run_evals_only
+
+    overrides["S1_EPOCHS"] = args.s1_epochs or PIPELINE_S1_EPOCHS
+    overrides["S2_EPOCHS"] = args.s2_epochs or PIPELINE_S2_EPOCHS
+    overrides["S1_LR"] = args.s1_lr or PIPELINE_S1_LR
+    overrides["S2_LR"] = args.s2_lr or PIPELINE_S2_LR
+    overrides["S1_BATCH_SIZE"] = args.s1_batch_size or PIPELINE_S1_BATCH
+    overrides["S2_BATCH_SIZE"] = args.s2_batch_size or PIPELINE_S2_BATCH
+
+    if args.checkpoint_upload_interval:
+        overrides["CHECKPOINT_UPLOAD_INTERVAL_EPOCHS"] = args.checkpoint_upload_interval
+
+    if args.stage2_subdir or PIPELINE_HF_STAGE2_SUBDIR:
+        overrides["HF_STAGE2_SAVE_SUBDIR"] = args.stage2_subdir or PIPELINE_HF_STAGE2_SUBDIR
+
+    force_stage2 = PIPELINE_FORCE_STAGE2_FROM_STAGE1
+    if args.force_stage2_from_stage1:
+        force_stage2 = True
+    if args.allow_stage2_resume:
+        force_stage2 = False
+    overrides["FORCE_STAGE2_FROM_STAGE1"] = force_stage2
+
+    if args.hf_stage1_repo or HUB_REPO_S1:
+        overrides["HF_STAGE1_REPO_ID"] = args.hf_stage1_repo or HUB_REPO_S1
+    if args.hf_stage2_repo or HUB_REPO_S2:
+        overrides["HF_STAGE2_REPO_ID"] = args.hf_stage2_repo or HUB_REPO_S2
+
+    token = _resolve_token(args.hf_token)
+    if token:
+        overrides["hf_auth_token"] = token
+
+    use_hub = not args.no_hub
+    if use_hub and not token:
+        # Without a token, skip Hub sync to avoid repeated warnings
+        use_hub = False
+    overrides["HF_USE_HUB"] = use_hub
+
+    if args.show_hub_progress:
+        overrides["HF_DISABLE_PROGRESS"] = False
+
+    return overrides
 
 
 def main():
-    """Main training pipeline"""
-    
-    print("="*60)
-    print("Motion LLM Training Pipeline")
-    print("="*60)
-    
-    # ==========================================
-    # 1. Load and prepare dataset
-    # ==========================================
-    print("\n[1/8] Loading dataset...")
-    assert os.path.exists(DATA_JSON_PATH), f"Missing: {DATA_JSON_PATH}"
-    
-    raw_ds = load_dataset(DATA_JSON_PATH)
-    print(f"Total samples: {len(raw_ds)}")
-    
-    # Build motion vocabulary
-    print("\n[2/8] Building motion vocabulary...")
-    codebook_size, global_max_id = build_motion_vocab(raw_ds)
-    
-    # Compute length statistics
-    print("\n[3/8] Computing length statistics...")
-    length_stats_by_text, global_median_len = compute_length_stats(raw_ds)
-    print(f"Global median length: {global_median_len}")
-    
-    # Build per-prompt vocabulary
-    print("\nBuilding per-prompt vocabulary...")
-    prompt_vocab = build_prompt_vocab(raw_ds)
-    
-    # Check for participant IDs
-    has_pid = check_has_participant_id(raw_ds)
-    print(f"Has participant IDs: {has_pid}")
-    
-    # Get unique PIDs if they exist
-    unique_pids = None
-    if has_pid:
-        unique_pids = sorted({str(ex["participant_id"]) for ex in raw_ds})
-        print(f"Unique participants: {len(unique_pids)}")
-    
-    # ==========================================
-    # 2. Setup model and tokenizer
-    # ==========================================
-    print("\n[4/8] Setting up model and tokenizer...")
-    model, tokenizer, new_token_ids = setup_model_and_tokenizer(
-        codebook_size, unique_pids
-    )
-    print(f"Model initialized with {len(tokenizer)} tokens")
-    
-    # Get motion token IDs
-    motion_token_ids, mot_begin_id, mot_end_id = get_motion_token_info(
-        tokenizer, codebook_size
-    )
-    
-    # ==========================================
-    # 3. Prepare datasets for all stages
-    # ==========================================
-    print("\n[5/8] Preparing datasets for all stages...")
-    
-    # Stage 1: Motion-only LM
-    mapper_s1 = create_mapper(1, has_pid)
-    train_s1, val_s1 = make_splits(raw_ds, mapper_s1, MAX_TRAIN_SAMPLES_S1)
-    print(f"Stage 1 - Train: {len(train_s1)}, Val: {len(val_s1)}")
-    # Show 1 sample (Stage 1)
-    if len(train_s1) > 0:
-        s1_example = train_s1[0]
-        print("\n[Sample] Stage 1 mapped example:")
-        print({k: (v) if isinstance(v, str) and len(v) > 240 else v for k, v in s1_example.items()})
-    
-    # Stage 2: Multi-task
-    mapper_s2 = create_mapper(2, has_pid)
-    train_s2, val_s2 = make_splits(raw_ds, mapper_s2, MAX_TRAIN_SAMPLES_S2)
-    print(f"Stage 2 - Train: {len(train_s2)}, Val: {len(val_s2)}")
-    # Show 1 sample (Stage 2)
-    if len(train_s2) > 0:
-        s2_example = train_s2[0]
-        print("\n[Sample] Stage 2 mapped example:")
-        print({k: (v ) if isinstance(v, str) and len(v) > 240 else v for k, v in s2_example.items()})
-    
-    # Stage 3: T2M SFT
-    mapper_s3 = create_mapper(3, has_pid)
-    train_s3, val_s3 = make_splits(raw_ds, mapper_s3, MAX_TRAIN_SAMPLES_S3)
-    print(f"Stage 3 - Train: {len(train_s3)}, Val: {len(val_s3)}")
-    # Show 1 sample (Stage 3)
-    if len(train_s3) > 0:
-        s3_example = train_s3[0]
-        print("\n[Sample] Stage 3 mapped example:")
-        print({k: (v) if isinstance(v, str) and len(v) > 240 else v for k, v in s3_example.items()})
-    
-    # Create data collator
-    collator = AssistantSpanCollator(tokenizer, MAX_SEQ_LEN)
-    
-    # Build text-to-refs mapping for evaluation
-    text_to_refs = build_text_to_refs(raw_ds)
-    t2m_pairs = [(k, v) for k, v in text_to_refs.items()]
-    
-    # ==========================================
-    # 4. Stage 1: Motion-only LM
-    # ==========================================
-    print("\n[6/8] Stage 1: Motion-only Language Model")
-    metrics_s1 = train_stage(
-        stage_name="Stage1_MotionOnlyLM",
-        model=model,
-        tokenizer=tokenizer,
-        train_dataset=train_s1,
-        eval_dataset=val_s1,
-        data_collator=collator,
-        out_dir=OUT_S1,
-        epochs=EPOCHS_S1
-    )
-    
-    # Move to GPU for inference
-    device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
-    model.to(device)
-    
-    # Quick test generations
-    print("\n[Stage 1 Quick Test Generations]")
-    test_prompts = ["walking", "running", "college", "witch"]
-    for prompt in test_prompts:
-        gen = generate_t2m(
-            model=model,
-            tokenizer=tokenizer,
-            prompt_text=prompt,
-            mot_begin_id=mot_begin_id,
-            mot_end_id=mot_end_id,
-            motion_token_ids=motion_token_ids,
-            length_stats_by_text=length_stats_by_text,
-            global_median_len=global_median_len,
-            prompt_vocab=prompt_vocab,
-            has_pid=has_pid,
-            per_prompt_vocab=False
-        )
-        print(f"{prompt} => {gen}")
-    
-    # ==========================================
-    # 5. Stage 2: Multi-task Pretrain
-    # ==========================================
-    print("\n[7/8] Stage 2: Multi-task Pretrain (T2M/M2T/Denoise)")
-    metrics_s2 = train_stage(
-        stage_name="Stage2_MultiTask",
-        model=model,
-        tokenizer=tokenizer,
-        train_dataset=train_s2,
-        eval_dataset=val_s2,
-        data_collator=collator,
-        out_dir=OUT_S2,
-        epochs=EPOCHS_S2
-    )
-    
-    # Evaluate T2M
-    print("\n[Stage 2 T2M Evaluation]")
-    eval_t2m_set(
-        model=model,
-        tokenizer=tokenizer,
-        sample_pairs=t2m_pairs,
-        mot_begin_id=mot_begin_id,
-        mot_end_id=mot_end_id,
-        motion_token_ids=motion_token_ids,
-        length_stats_by_text=length_stats_by_text,
-        global_median_len=global_median_len,
-        prompt_vocab=prompt_vocab,
-        has_pid=has_pid,
-        per_prompt_vocab=True,
-        n_eval=50
-    )
-    
-    # ==========================================
-    # 6. Stage 3: T2M SFT
-    # ==========================================
-    print("\n[8/8] Stage 3: Text-to-Motion Supervised Fine-Tuning")
-    metrics_s3 = train_stage(
-        stage_name="Stage3_T2M_SFT",
-        model=model,
-        tokenizer=tokenizer,
-        train_dataset=train_s3,
-        eval_dataset=val_s3,
-        data_collator=collator,
-        out_dir=OUT_S3,
-        epochs=EPOCHS_S3
-    )
-    
-    # Move to GPU for final evaluation
-    model.to(device)
-    
-    # Final evaluation
-    print("\n[Stage 3 Final T2M Evaluation]")
-    eval_t2m_set(
-        model=model,
-        tokenizer=tokenizer,
-        sample_pairs=t2m_pairs,
-        mot_begin_id=mot_begin_id,
-        mot_end_id=mot_end_id,
-        motion_token_ids=motion_token_ids,
-        length_stats_by_text=length_stats_by_text,
-        global_median_len=global_median_len,
-        prompt_vocab=prompt_vocab,
-        has_pid=has_pid,
-        per_prompt_vocab=True,
-        n_eval=100
-    )
-    
-    # Final test generations
-    print("\n[Final Sample Generations]")
-    final_prompts = ["college", "president", "witch", "dance", "yoga"]
-    for prompt in final_prompts:
-        gen = generate_t2m(
-            model=model,
-            tokenizer=tokenizer,
-            prompt_text=prompt,
-            mot_begin_id=mot_begin_id,
-            mot_end_id=mot_end_id,
-            motion_token_ids=motion_token_ids,
-            length_stats_by_text=length_stats_by_text,
-            global_median_len=global_median_len,
-            prompt_vocab=prompt_vocab,
-            has_pid=has_pid,
-            per_prompt_vocab=True
-        )
-        print(f"{prompt} => {gen}")
-    
-    # ==========================================
-    # Training complete
-    # ==========================================
-    print("\n" + "="*60)
-    print("Training pipeline complete!")
-    print("="*60)
-    print(f"\nStage 1 eval loss: {metrics_s1.get('eval_loss', 'N/A')}")
-    print(f"Stage 2 eval loss: {metrics_s2.get('eval_loss', 'N/A')}")
-    print(f"Stage 3 eval loss: {metrics_s3.get('eval_loss', 'N/A')}")
-    print("\nModels saved to:")
-    print(f"  - {OUT_S1}")
-    print(f"  - {OUT_S2}")
-    print(f"  - {OUT_S3}")
+    args = parse_args()
+    overrides = build_overrides(args)
+    print("Running SignMotionGPT pipeline with the test_overfit configuration...")
+    test_overfit.main(overrides)
 
 
 if __name__ == "__main__":

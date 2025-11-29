@@ -32,7 +32,7 @@ OUTPUT_DIR = "./motion_gpt_full_model"
 # If False: run the existing flow and also compute these 3 metrics.
 RUN_EVALS_ONLY = False
 EVAL_SAMPLE_LIMIT = 100
-METRICS_JSON_PATH = os.path.join(OUTPUT_DIR, "metrics.json")
+METRICS_JSON_PATH = ""
 
 # --- Training Hyperparameters ---
 # NOTE: Training on the full dataset will take longer.
@@ -58,9 +58,9 @@ PAD_TOKEN = "<PAD>"
 # --- Hugging Face Hub Configuration ---
 # Provide HUGGINGFACE_HUB_TOKEN or hf_auth_token in environment for private repos.
 HF_USE_HUB = True
-hf_auth_token = os.getenv("hf_auth_token")
-if hf_auth_token is None:
-    raise ValueError("hf_auth_token environment variable is not set")
+hf_auth_token = os.getenv("hf_auth_token") or os.getenv("HUGGINGFACE_HUB_TOKEN")
+if HF_USE_HUB and hf_auth_token is None:
+    print("⚠️  hf_auth_token environment variable is not set; Hub sync will be disabled.")
 HF_STAGE1_REPO_ID = "rdz-falcon/SignMotionGPTfit-archive"
 HF_STAGE2_REPO_ID = "rdz-falcon/SignMotionGPTfit-archive"
 HF_PRIVATE_REPO = os.environ.get("HF_PRIVATE", "true").lower() != "false"
@@ -70,21 +70,67 @@ FORCE_STAGE2_FROM_STAGE1 = str(FORCE_STAGE2_FROM_STAGE1_RAW).strip().lower() not
 HF_STAGE2_SAVE_SUBDIR = os.environ.get("HF_STAGE2_SAVE_SUBDIR", "stage2_v2")
 
 # --- Local Checkpoint Root ---
-CHECKPOINTS_DIR = os.path.join(OUTPUT_DIR, "checkpoints")
+CHECKPOINTS_DIR = ""
 
 # --- Upload frequency and progress control ---
 # Push to Hugging Face only every N epochs (still save locally every epoch)
 CHECKPOINT_UPLOAD_INTERVAL_EPOCHS = int(os.environ.get("HF_UPLOAD_INTERVAL_EPOCHS", "2"))
 # Disable HF Hub progress bars to reduce noisy logs (set HF_DISABLE_PROGRESS=false to re-enable)
 HF_DISABLE_PROGRESS = os.environ.get("HF_DISABLE_PROGRESS", "true").lower() != "false"
-if HF_DISABLE_PROGRESS:
-    try:
-        # Also respected by huggingface_hub internal progress usage
-        os.environ.setdefault("HF_HUB_DISABLE_PROGRESS_BARS", "1")
-        from huggingface_hub.utils import disable_progress_bars  # type: ignore
-        disable_progress_bars()
-    except Exception:
-        pass
+
+
+def _refresh_runtime_paths() -> None:
+    """Refresh derived paths when OUTPUT_DIR changes."""
+    global METRICS_JSON_PATH, CHECKPOINTS_DIR
+    METRICS_JSON_PATH = os.path.join(OUTPUT_DIR, "metrics.json")
+    CHECKPOINTS_DIR = os.path.join(OUTPUT_DIR, "checkpoints")
+
+
+def _apply_progress_setting() -> None:
+    """Apply huggingface_hub progress bar preference."""
+    if HF_DISABLE_PROGRESS:
+        try:
+            # Also respected by huggingface_hub internal progress usage
+            os.environ.setdefault("HF_HUB_DISABLE_PROGRESS_BARS", "1")
+            from huggingface_hub.utils import disable_progress_bars  # type: ignore
+
+            disable_progress_bars()
+        except Exception:
+            pass
+    else:
+        os.environ.pop("HF_HUB_DISABLE_PROGRESS_BARS", None)
+
+
+def apply_config_overrides(overrides: Optional[Dict[str, Any]] = None) -> None:
+    """
+    Allow external callers to override module-level configuration prior to running main().
+    """
+    global hf_auth_token, HF_DISABLE_PROGRESS, OUTPUT_DIR
+    if not overrides:
+        return
+
+    updated_paths = False
+    progress_flag_updated = False
+    for key, value in overrides.items():
+        if key == "hf_auth_token":
+            hf_auth_token = value
+            continue
+        if key not in globals():
+            print(f"[config] Unknown override ignored: {key}")
+            continue
+        globals()[key] = value
+        if key == "OUTPUT_DIR":
+            updated_paths = True
+        if key == "HF_DISABLE_PROGRESS":
+            progress_flag_updated = True
+    if updated_paths:
+        _refresh_runtime_paths()
+    if progress_flag_updated:
+        _apply_progress_setting()
+
+
+_refresh_runtime_paths()
+_apply_progress_setting()
 
 
 # ======================================================================================
@@ -1368,8 +1414,15 @@ def save_side_by_side_visualizations(pairs: list[Tuple[str, str, str]], output_d
 # ======================================================================================
 # 6. Main Execution Block (UPDATED)
 # ======================================================================================
-def main():
+def main(config_overrides: Optional[Dict[str, Any]] = None):
     """Main function to run the entire pipeline."""
+    apply_config_overrides(config_overrides)
+    if config_overrides:
+        printable = {k: v for k, v in config_overrides.items() if "token" not in k.lower()}
+        if printable:
+            print("\nApplied config overrides:")
+            for key, value in printable.items():
+                print(f"  - {key} = {value}")
     random.seed(42)
     torch.manual_seed(42)
     

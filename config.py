@@ -64,6 +64,22 @@ GEN_NO_REPEAT_NGRAM_SIZE = 6
 GEN_REPETITION_PENALTY = 1.2
 GEN_END_LOGIT_SLOPE = 0.25
 
+# Full pipeline (test_overfit parity) defaults
+PIPELINE_MODEL_NAME = os.environ.get("PIPELINE_MODEL_NAME", "Qwen/Qwen3-0.6B")
+PIPELINE_OUTPUT_DIR = os.environ.get("PIPELINE_OUTPUT_DIR", os.path.join(WORK_DIR, "motion_gpt_full_model"))
+_PIPELINE_EVAL_WORDS_RAW = os.environ.get("PIPELINE_EVAL_WORDS", "passport,send,library,push")
+PIPELINE_EVAL_WORDS = [w.strip() for w in _PIPELINE_EVAL_WORDS_RAW.split(",") if w.strip()]
+PIPELINE_EVAL_SAMPLE_LIMIT = int(os.environ.get("PIPELINE_EVAL_SAMPLE_LIMIT", "100"))
+PIPELINE_RUN_EVALS_ONLY = os.environ.get("PIPELINE_RUN_EVALS_ONLY", "false").lower() not in ("0", "false", "no", "off")
+PIPELINE_S1_EPOCHS = int(os.environ.get("PIPELINE_S1_EPOCHS", "20"))
+PIPELINE_S2_EPOCHS = int(os.environ.get("PIPELINE_S2_EPOCHS", "20"))
+PIPELINE_S1_LR = float(os.environ.get("PIPELINE_S1_LR", "5e-5"))
+PIPELINE_S2_LR = float(os.environ.get("PIPELINE_S2_LR", "2e-5"))
+PIPELINE_S1_BATCH = int(os.environ.get("PIPELINE_S1_BATCH", "8"))
+PIPELINE_S2_BATCH = int(os.environ.get("PIPELINE_S2_BATCH", "8"))
+PIPELINE_HF_STAGE2_SUBDIR = os.environ.get("PIPELINE_HF_STAGE2_SUBDIR", "stage2_v2")
+PIPELINE_FORCE_STAGE2_FROM_STAGE1 = os.environ.get("PIPELINE_FORCE_STAGE2_FROM_STAGE1", "false").lower() not in ("0", "false", "no", "off")
+
 # System prompt
 SYSTEM_MSG = (
     "You are a MotionGPT-style assistant for joint text–motion modeling.\n"
@@ -85,3 +101,18 @@ HF_USER = os.environ.get("HF_USER", "rdz-falcon")
 HUB_REPO_S1 = os.environ.get("HUB_REPO_S1", f"{HF_USER}/signmotiongpt-stage1")
 HUB_REPO_S2 = os.environ.get("HUB_REPO_S2", f"{HF_USER}/signmotiongpt-stage2")
 HUB_REPO_S3 = os.environ.get("HUB_REPO_S3", f"{HF_USER}/signmotiongpt-stage3")
+
+# Held-out test evaluation defaults
+TEST_EVAL_OUTPUT_DIR = os.environ.get("TEST_EVAL_OUTPUT_DIR", PIPELINE_OUTPUT_DIR)
+TEST_EVAL_DOWNLOAD_DIR = os.environ.get(
+    "TEST_EVAL_DOWNLOAD_DIR", os.path.join(WORK_DIR, "test_data", "downloads")
+)
+TEST_EVAL_EXTRACT_DIR = os.environ.get(
+    "TEST_EVAL_EXTRACT_DIR", os.path.join(WORK_DIR, "test_data", "extracted")
+)
+TEST_EVAL_SAMPLE_LIMIT = int(os.environ.get("TEST_EVAL_SAMPLE_LIMIT", "300"))
+TEST_EVAL_MAX_ZIPS = int(os.environ.get("TEST_EVAL_MAX_ZIPS", "500"))
+TEST_EVAL_HF_REPO = os.environ.get("TEST_EVAL_HF_REPO", f"{HF_USER}/SignMotionGPTfit-archive")
+TEST_EVAL_HF_SUBFOLDER = os.environ.get(
+    "TEST_EVAL_HF_SUBFOLDER", f"{PIPELINE_HF_STAGE2_SUBDIR}/latest"
+)

@@ -70,13 +70,25 @@ MODEL_NAME = "unsloth/Qwen3-1.7B"  # or "unsloth/gemma-3-1b-it"
 WORK_DIR = "./output"
 ```
 
-### 2. Run Training Pipeline
+### 2. Run Full-Data Training (test_overfit pipeline)
 
 ```bash
-python train_pipeline.py
+python train_pipeline.py \
+  --dataset-path ./data/motion_llm_dataset.json \
+  --output-dir ./motion_gpt_full_model \
+  --hf-token "$HUGGINGFACE_HUB_TOKEN"
 ```
 
-This will execute all 3 training stages sequentially.
+`train_pipeline.py` is now a thin wrapper that forwards all options to
+`test_overfit.py`, guaranteeing the same two-stage training recipe that was
+validated in Colab. Key flags:
+
+- `--s1-epochs / --s2-epochs`, `--s1-lr / --s2-lr`, `--s1-batch-size / --s2-batch-size`
+- `--hf-stage1-repo / --hf-stage2-repo` (defaults pulled from `config.py`)
+- `--stage2-subdir` for the Hugging Face checkpoint subfolder (defaults to `stage2_v2`)
+- `--evals-only` or `--full-train` to toggle the metrics-only mode inside `test_overfit.py`
+
+Provide `HUGGINGFACE_HUB_TOKEN` (or pass `--hf-token`) for private repos.
 
 ### 3. Generate Motions
 
@@ -88,6 +100,35 @@ python inference.py \
   --prompt "a person walking forward" \
   --output motion_output.txt
 ```
+
+
+## Held-out Test Dataset Evaluation
+
+Use `test_dataset_eval.py` to measure FID / Diversity / Multimodality on a
+Drive-hosted or locally extracted SMPL-X test set that the model never sees
+during training.
+
+```bash
+# Evaluate using a directory that already contains video_data.pkl files
+python test_dataset_eval.py \
+  --local-extracted-dir ./test_data/extracted/batch01 \
+  --hf-repo-id rdz-falcon/SignMotionGPTfit-archive \
+  --hf-subfolder stage2_v2/epoch-020
+```
+
+To download raw archives from Google Drive (requires `pip install gdown`):
+
+```bash
+python test_dataset_eval.py \
+  --drive-id 1AbCdEfGhIjKlMnOp \
+  --download-dir ./test_data/downloads \
+  --extract-dir ./test_data/extracted \
+  --sample-limit 300
+```
+
+Metrics are written to `metrics_test.json` inside `TEST_EVAL_OUTPUT_DIR`
+(configurable via `config.py` or CLI flags). The script loads the Stage 2 model
+from Hugging Face along with the VQ-VAE assets declared in `visualize.py`.
 
 
 ## Configuration
@@ -109,6 +150,12 @@ Key hyperparameters in `config.py`:
 - `GEN_TEMPERATURE`: Sampling temperature
 - `GEN_TOP_P`: Nucleus sampling threshold
 - `GEN_END_LOGIT_SLOPE`: Bias toward target length
+
+### Pipeline / Evaluation Overrides
+- `PIPELINE_*` keys control the defaults consumed by `train_pipeline.py` →
+  `test_overfit.py` (model name, stage lengths, learning rates, HF subfolders, etc.).
+- `TEST_EVAL_*` keys configure `test_dataset_eval.py` (download/extract directories,
+  sample limit, HF repo/subfolder).
 
 ## Training Stages Explained
 
