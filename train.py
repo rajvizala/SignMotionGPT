@@ -4,18 +4,470 @@ Training utilities and functions
 import math
 import os
 import re
-from typing import Optional
-
+import time
+import json
+import shutil
 import torch
-from transformers import TrainingArguments, Trainer
+from datetime import datetime
+from typing import Optional, Dict, Any, List, Tuple
+from torch.optim import AdamW
+from torch.utils.data import DataLoader
+
+from transformers import TrainingArguments, Trainer, AutoModelForCausalLM, AutoTokenizer
 from transformers.trainer_callback import TrainerCallback
-from huggingface_hub import HfApi, upload_folder, snapshot_download
+from huggingface_hub import HfApi, upload_folder, snapshot_download, hf_hub_download
+
 from config import (
     BATCH_TRAIN, BATCH_EVAL, GRAD_ACCUM, LR, WARMUP,
     LOG_STEPS, EVAL_STEPS, SAVE_STEPS, SEED, DTYPE,
-    HUB_REPO_S1, HUB_REPO_S2, HUB_REPO_S3, HF_TOKEN
+    HUB_REPO_S1, HUB_REPO_S2, HUB_REPO_S3, HF_TOKEN,
+    CHECKPOINTS_DIR, HF_USE_HUB, CHECKPOINT_UPLOAD_INTERVAL_EPOCHS,
+    S1_BATCH_SIZE, S1_LR, S1_EPOCHS, S2_BATCH_SIZE, S2_LR, S2_EPOCHS,
+    PAD_TOKEN, M_START, M_END
 )
 
+# ======================================================================================
+# Logic from test_overfit.py (Raw Training Loops & HF Utils)
+# ======================================================================================
+
+def _format_seconds(seconds: float) -> str:
+    """Formats seconds into H:MM:SS or M:SS."""
+    seconds = int(max(0, seconds))
+    h = seconds // 3600
+    m = (seconds % 3600) // 60
+    s = seconds % 60
+    if h > 0:
+        return f"{h:d}:{m:02d}:{s:02d}"
+    return f"{m:d}:{s:02d}"
+
+def _ensure_dir(path: str) -> None:
+    os.makedirs(path, exist_ok=True)
+
+def resolve_and_ensure_repo(repo_id: str, hf_auth_token: Optional[str] = None) -> Optional[str]:
+    """
+    Ensures the HF repo exists. Returns the fully-qualified repo_id (namespace/repo)
+    when token is available; otherwise returns the input repo_id.
+    """
+    if not HF_USE_HUB:
+        return None
+    token = hf_auth_token or HF_TOKEN
+    if not token:
+        print("⚠️  HF token not found. Set HUGGINGFACE_HUB_TOKEN to enable Hub sync.")
+        return None
+    api = HfApi()
+    try:
+        who = api.whoami(token=token)
+        namespace = who.get("name") or (who.get("orgs", [None])[0] if isinstance(who.get("orgs"), list) else None)
+    except Exception as exc:
+        print(f"⚠️  Unable to resolve HF namespace: {exc}")
+        namespace = None
+    if "/" not in repo_id and namespace:
+        full_repo_id = f"{namespace}/{repo_id}"
+    else:
+        full_repo_id = repo_id
+    try:
+        api.create_repo(
+            repo_id=full_repo_id,
+            token=token,
+            repo_type="model",
+            private=True, # Default to private as in test_overfit config if not specified
+            exist_ok=True,
+        )
+    except Exception as exc:
+        print(f"⚠️  create_repo failed (may already exist): {exc}")
+    return full_repo_id
+
+def repo_has_stage_latest(repo_id: str, stage: str, hf_auth_token: Optional[str] = None) -> bool:
+    """Checks if a stage/latest checkpoint exists in the HF repo."""
+    token = hf_auth_token or HF_TOKEN
+    if not HF_USE_HUB or not token:
+        return False
+    api = HfApi()
+    try:
+        files = api.list_repo_files(repo_id=repo_id, repo_type="model", token=token)
+        return any(path.startswith(f"{stage}/latest/") and path.endswith("config.json") for path in files)
+    except Exception as exc:
+        print(f"⚠️  Could not list files for {repo_id}: {exc}")
+        return False
+
+def repo_list_epoch_numbers(repo_id: str, stage: str, hf_auth_token: Optional[str] = None) -> List[int]:
+    """
+    Returns sorted list of epoch numbers available under {stage}/epoch-XXX/ by scanning files.
+    """
+    token = hf_auth_token or HF_TOKEN
+    if not HF_USE_HUB or not token:
+        return []
+    api = HfApi()
+    try:
+        files = api.list_repo_files(repo_id=repo_id, repo_type="model", token=token)
+    except Exception as exc:
+        print(f"⚠️  Could not list files for {repo_id}: {exc}")
+        return []
+    epoch_numbers: List[int] = []
+    pattern = re.compile(rf"^{re.escape(stage)}/epoch-(\d+)/config\.json$")
+    for path in files:
+        m = pattern.match(path)
+        if m:
+            try:
+                epoch_numbers.append(int(m.group(1)))
+            except ValueError:
+                pass
+    return sorted(set(epoch_numbers))
+
+def repo_get_latest_epoch_subfolder(repo_id: str, stage: str, hf_auth_token: Optional[str] = None) -> Optional[str]:
+    """
+    Returns subfolder path like '{stage}/epoch-XXX' for the highest available epoch, or None.
+    """
+    epochs = repo_list_epoch_numbers(repo_id, stage, hf_auth_token)
+    if not epochs:
+        return None
+    latest = max(epochs)
+    return f"{stage}/epoch-{latest:03d}"
+
+def load_model_and_tokenizer_from_hf_subfolder(repo_id: str, subfolder: str, hf_auth_token: Optional[str] = None) -> Optional[Tuple[AutoModelForCausalLM, AutoTokenizer]]:
+    """
+    Loads model and tokenizer from HF under a specific subfolder.
+    """
+    if not HF_USE_HUB or (not hf_auth_token and not HF_TOKEN):
+        return None
+    print(f"\n---> Loading checkpoint from Hugging Face: {repo_id} (subfolder='{subfolder}')")
+    try:
+        tokenizer = AutoTokenizer.from_pretrained(repo_id, subfolder=subfolder, trust_remote_code=True)
+        model = AutoModelForCausalLM.from_pretrained(repo_id, subfolder=subfolder, trust_remote_code=True)
+    except Exception as exc:
+        print(f"⚠️  Failed to load model/tokenizer from subfolder '{subfolder}': {exc}")
+        return None
+    if tokenizer.pad_token is None:
+        tokenizer.add_special_tokens({"pad_token": PAD_TOKEN})
+    model.resize_token_embeddings(len(tokenizer))
+    model.config.pad_token_id = tokenizer.pad_token_id
+    return model, tokenizer
+
+def download_training_state_from_subfolder(repo_id: str, subfolder: str, hf_auth_token: Optional[str] = None) -> Optional[Dict[str, Any]]:
+    """
+    Downloads training_state.json from a specific subfolder.
+    """
+    token = hf_auth_token or HF_TOKEN
+    if not HF_USE_HUB or not token:
+        return None
+    try:
+        state_path = hf_hub_download(
+            repo_id=repo_id,
+            filename=f"{subfolder}/training_state.json",
+            repo_type="model",
+            token=token,
+        )
+        with open(state_path, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return None
+
+def download_training_state(repo_id: str, stage: str, hf_auth_token: Optional[str] = None) -> Optional[Dict[str, Any]]:
+    """Downloads training_state.json from HF if present."""
+    token = hf_auth_token or HF_TOKEN
+    if not HF_USE_HUB or not token:
+        return None
+    try:
+        state_path = hf_hub_download(
+            repo_id=repo_id,
+            filename=f"{stage}/latest/training_state.json",
+            repo_type="model",
+            token=token,
+        )
+        with open(state_path, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return None
+
+def download_optimizer_state(repo_id: str, stage: str, hf_auth_token: Optional[str] = None) -> Optional[str]:
+    """Downloads optimizer.pt for resuming optimizer state."""
+    token = hf_auth_token or HF_TOKEN
+    if not HF_USE_HUB or not token:
+        return None
+    try:
+        opt_path = hf_hub_download(
+            repo_id=repo_id,
+            filename=f"{stage}/latest/optimizer.pt",
+            repo_type="model",
+            token=token,
+        )
+        return opt_path
+    except Exception:
+        return None
+
+def load_model_and_tokenizer_from_hf(repo_id: str, stage: str, hf_auth_token: Optional[str] = None) -> Optional[Tuple[AutoModelForCausalLM, AutoTokenizer]]:
+    """
+    Loads model and tokenizer from HF under subfolder {stage}/latest if available.
+    """
+    if not repo_has_stage_latest(repo_id, stage, hf_auth_token):
+        return None
+    print(f"\n---> Loading checkpoint from Hugging Face: {repo_id} (subfolder='{stage}/latest')")
+    tokenizer = AutoTokenizer.from_pretrained(repo_id, subfolder=f"{stage}/latest", trust_remote_code=True)
+    model = AutoModelForCausalLM.from_pretrained(repo_id, subfolder=f"{stage}/latest", trust_remote_code=True)
+    if tokenizer.pad_token is None:
+        tokenizer.add_special_tokens({"pad_token": PAD_TOKEN})
+    model.resize_token_embeddings(len(tokenizer))
+    model.config.pad_token_id = tokenizer.pad_token_id
+    return model, tokenizer
+
+def save_and_push_checkpoint(
+    stage: str,
+    epoch_index_zero_based: int,
+    model: AutoModelForCausalLM,
+    tokenizer: AutoTokenizer,
+    optimizer: AdamW,
+    avg_loss: float,
+    dataloader_len: int,
+    batch_size: int,
+    total_epochs: int,
+    repo_id: Optional[str],
+    hf_auth_token: Optional[str] = None
+) -> None:
+    """
+    Saves checkpoint locally and pushes to HF.
+    """
+    token = hf_auth_token or HF_TOKEN
+    epoch_number = epoch_index_zero_based + 1
+    stage_dir = os.path.join(CHECKPOINTS_DIR, stage)
+    epoch_dir_name = f"epoch-{epoch_number:03d}"
+    epoch_dir = os.path.join(stage_dir, epoch_dir_name)
+    latest_dir = os.path.join(stage_dir, "latest")
+    _ensure_dir(epoch_dir)
+    _ensure_dir(stage_dir)
+
+    # Save model + tokenizer
+    model.save_pretrained(epoch_dir)
+    tokenizer.save_pretrained(epoch_dir)
+
+    # Save optimizer state
+    torch.save(optimizer.state_dict(), os.path.join(epoch_dir, "optimizer.pt"))
+
+    # Save training state
+    training_state = {
+        "stage": stage,
+        "epoch_completed": epoch_number,
+        "total_epochs_for_stage": total_epochs,
+        "global_step": epoch_number * dataloader_len,
+        "avg_loss": float(avg_loss),
+        "batch_size": batch_size,
+        "saved_at": datetime.utcnow().isoformat() + "Z",
+    }
+    with open(os.path.join(epoch_dir, "training_state.json"), "w", encoding="utf-8") as f:
+        json.dump(training_state, f, ensure_ascii=False, indent=2)
+
+    # Update "latest"
+    if os.path.exists(latest_dir):
+        shutil.rmtree(latest_dir)
+    shutil.copytree(epoch_dir, latest_dir)
+
+    # Push to Hugging Face
+    if HF_USE_HUB and repo_id and token:
+        try:
+            upload_folder(
+                repo_id=repo_id,
+                folder_path=epoch_dir,
+                path_in_repo=f"{stage}/{epoch_dir_name}",
+                repo_type="model",
+                token=token,
+                commit_message=f"{stage}: save {epoch_dir_name}",
+            )
+            upload_folder(
+                repo_id=repo_id,
+                folder_path=latest_dir,
+                path_in_repo=f"{stage}/latest",
+                repo_type="model",
+                token=token,
+                commit_message=f"{stage}: update latest -> {epoch_dir_name}",
+            )
+            print(f"☁️  Pushed checkpoint to HF: {repo_id} ({stage}/{epoch_dir_name} and {stage}/latest)")
+        except Exception as exc:
+            print(f"⚠️  Failed to push checkpoint to HF: {exc}")
+    else:
+        print("ℹ️  Skipped HF push (Hub disabled or token/repo missing).")
+
+def train_stage1_raw(
+    model,
+    tokenizer,
+    data: List[Dict[str, Any]],
+    device,
+    start_epoch: int = 0,
+    hf_repo_id: Optional[str] = None,
+):
+    """Trains the model on motion sequences only to learn the 'language of motion'."""
+    from data import MotionDataset # Import here to avoid circular imports
+    
+    print("\n" + "="*80)
+    print("      STAGE 1: MOTION LANGUAGE MODELING (PRE-TRAINING)")
+    print(f"      Training on {len(data)} samples.")
+    print("="*80)
+    
+    dataset = MotionDataset(data, tokenizer)
+    dataloader = DataLoader(dataset, batch_size=S1_BATCH_SIZE, shuffle=True)
+
+    optimizer = AdamW(model.parameters(), lr=S1_LR)
+    model.to(device)
+    model.train()
+
+    # Try to resume optimizer if we resumed from HF
+    token = HF_TOKEN
+    if hf_repo_id and start_epoch > 0 and HF_USE_HUB and token:
+        opt_path = download_optimizer_state(hf_repo_id, "stage1", token)
+        if opt_path is not None:
+            try:
+                optimizer.load_state_dict(torch.load(opt_path, map_location=device))
+                print("↩️  Resumed optimizer state for Stage 1 from HF.")
+            except Exception as exc:
+                print(f"⚠️  Failed to load optimizer state for Stage 1: {exc}")
+
+    for epoch in range(start_epoch, S1_EPOCHS):
+        total_loss = 0
+        total_batches = len(dataloader)
+        epoch_start_time = time.time()
+        step_interval = max(1, total_batches // 50)  # ~2% progress updates
+        for i, batch in enumerate(dataloader, 1):
+            optimizer.zero_grad()
+            
+            input_ids = batch['input_ids'].squeeze(1).to(device)
+            attention_mask = batch['attention_mask'].squeeze(1).to(device)
+            
+            outputs = model(input_ids=input_ids, attention_mask=attention_mask, labels=input_ids)
+            
+            loss = outputs.loss
+            loss.backward()
+            optimizer.step()
+            total_loss += loss.item()
+
+            # Progress with ETA
+            if i == 1 or (i % step_interval == 0) or (i == total_batches):
+                elapsed = time.time() - epoch_start_time
+                est_total = (elapsed / i) * total_batches
+                eta = est_total - elapsed
+                pct = (i / total_batches) * 100.0
+                print(
+                    f"\r[Stage 1] Epoch {epoch+1}/{S1_EPOCHS} - "
+                    f"{i}/{total_batches} ({pct:.1f}%) - ETA {_format_seconds(eta)}",
+                    end="",
+                    flush=True,
+                )
+        
+        # Finish the progress line
+        print()
+        avg_loss = total_loss / len(dataloader)
+        print(f"--- End of Epoch {epoch+1}/{S1_EPOCHS}, Average Loss: {avg_loss:.4f} ---")
+        # Save checkpoint locally every epoch; push to HF only at interval or final epoch
+        push_this_epoch = ((epoch + 1) % CHECKPOINT_UPLOAD_INTERVAL_EPOCHS == 0) or ((epoch + 1) == S1_EPOCHS)
+        repo_for_epoch = hf_repo_id if push_this_epoch else None
+        save_and_push_checkpoint(
+            stage="stage1",
+            epoch_index_zero_based=epoch,
+            model=model,
+            tokenizer=tokenizer,
+            optimizer=optimizer,
+            avg_loss=avg_loss,
+            dataloader_len=len(dataloader),
+            batch_size=S1_BATCH_SIZE,
+            total_epochs=S1_EPOCHS,
+            repo_id=repo_for_epoch,
+            hf_auth_token=token
+        )
+    
+    print("\n✅ Stage 1 Training Complete.")
+    return model
+
+def train_stage2_raw(
+    model,
+    tokenizer,
+    data: List[Dict[str, Any]],
+    device,
+    start_epoch: int = 0,
+    hf_repo_id: Optional[str] = None,
+    hf_stage_subdir: str = "stage2",
+):
+    """Fine-tunes the motion-aware model to connect text prompts to motions."""
+    from data import TextMotionDataset # Import here to avoid circular imports
+
+    print("\n" + "="*80)
+    print("      STAGE 2: TEXT-TO-MOTION FINE-TUNING")
+    print(f"      Training on {len(data)} samples.")
+    print("="*80)
+    
+    dataset = TextMotionDataset(data, tokenizer)
+    dataloader = DataLoader(dataset, batch_size=S2_BATCH_SIZE, shuffle=True)
+
+    optimizer = AdamW(model.parameters(), lr=S2_LR)
+    model.to(device)
+    model.train()
+
+    # Try to resume optimizer if we resumed from HF
+    token = HF_TOKEN
+    if hf_repo_id and start_epoch > 0 and HF_USE_HUB and token:
+        opt_path = download_optimizer_state(hf_repo_id, hf_stage_subdir, token)
+        if opt_path is not None:
+            try:
+                optimizer.load_state_dict(torch.load(opt_path, map_location=device))
+                print("↩️  Resumed optimizer state for Stage 2 from HF.")
+            except Exception as exc:
+                print(f"⚠️  Failed to load optimizer state for Stage 2: {exc}")
+
+    for epoch in range(start_epoch, S2_EPOCHS):
+        total_loss = 0
+        total_batches = len(dataloader)
+        epoch_start_time = time.time()
+        step_interval = max(1, total_batches // 50)  # ~2% progress updates
+        for i, batch in enumerate(dataloader, 1):
+            optimizer.zero_grad()
+            
+            input_ids = batch['input_ids'].to(device)
+            attention_mask = batch['attention_mask'].to(device)
+            labels = batch['labels'].to(device)
+            
+            outputs = model(input_ids=input_ids, attention_mask=attention_mask, labels=labels)
+            
+            loss = outputs.loss
+            loss.backward()
+            optimizer.step()
+            total_loss += loss.item()
+
+            # Progress with ETA
+            if i == 1 or (i % step_interval == 0) or (i == total_batches):
+                elapsed = time.time() - epoch_start_time
+                est_total = (elapsed / i) * total_batches
+                eta = est_total - elapsed
+                pct = (i / total_batches) * 100.0
+                print(
+                    f"\r[Stage 2] Epoch {epoch+1}/{S2_EPOCHS} - "
+                    f"{i}/{total_batches} ({pct:.1f}%) - ETA {_format_seconds(eta)}",
+                    end="",
+                    flush=True,
+                )
+        
+        # Finish the progress line
+        print()
+        avg_loss = total_loss / len(dataloader)
+        print(f"--- End of Epoch {epoch+1}/{S2_EPOCHS}, Average Loss: {avg_loss:.4f} ---")
+        # Save checkpoint locally every epoch; push to HF only at interval or final epoch
+        push_this_epoch = ((epoch + 1) % CHECKPOINT_UPLOAD_INTERVAL_EPOCHS == 0) or ((epoch + 1) == S2_EPOCHS)
+        repo_for_epoch = hf_repo_id if push_this_epoch else None
+        save_and_push_checkpoint(
+            stage=hf_stage_subdir,
+            epoch_index_zero_based=epoch,
+            model=model,
+            tokenizer=tokenizer,
+            optimizer=optimizer,
+            avg_loss=avg_loss,
+            dataloader_len=len(dataloader),
+            batch_size=S2_BATCH_SIZE,
+            total_epochs=S2_EPOCHS,
+            repo_id=repo_for_epoch,
+            hf_auth_token=token
+        )
+        
+    print("\n✅ Stage 2 Training Complete.")
+    return model
+
+# ======================================================================================
+# Existing Utilities
+# ======================================================================================
 
 def make_training_args(out_dir: str, epochs: int, two_point_hub: bool = False) -> TrainingArguments:
     """

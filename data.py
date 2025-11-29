@@ -2,21 +2,142 @@
 Dataset loading and vocabulary building utilities
 """
 import json
+import os
 import random
-from typing import List, Dict, Tuple
+from typing import List, Dict, Tuple, Any
 from collections import defaultdict
-from datasets import Dataset
-from config import SEED, MAX_EVAL_SAMPLES
+import torch
+from torch.utils.data import Dataset, DataLoader
+from transformers import AutoTokenizer
+from config import M_START, M_END, PAD_TOKEN
 
+# ======================================================================================
+# Logic from test_overfit.py
+# ======================================================================================
 
-def load_dataset(data_path: str) -> Dataset:
-    """Load dataset from JSON file"""
-    with open(data_path, "r") as f:
-        data = json.load(f)
-    return Dataset.from_list(data)
+def read_json_data(json_path: str) -> List[Dict[str, Any]]:
+    """Loads the dataset from the specified JSON file."""
+    if not os.path.exists(json_path):
+        raise FileNotFoundError(f"Dataset not found at: {json_path}")
+    with open(json_path, "r", encoding="utf-8") as f:
+        return json.load(f)
 
+def deduplicate_and_prepare_data(entries: List[Dict[str, Any]]) -> Tuple[List[Dict[str, Any]], List[str]]:
+    """
+    Cleans the entire dataset by ensuring each (word, participant_id) pair is unique.
+    If a conflict is found (same pair, different motion), it keeps only the first one encountered.
+    Then, it prepares the full list of motion tokens from the cleaned data.
+    """
+    print("\n---> Cleaning dataset by removing ambiguous (word, participant_id) pairs...")
+    
+    unique_samples = {}
+    conflicts_found = 0
+    
+    for entry in entries:
+        word = entry.get("word", "").lower()
+        pid = entry.get("participant_id", "")
+        key = (word, pid)
+        
+        if key not in unique_samples:
+            unique_samples[key] = entry
+        else:
+            # A sample for this key already exists. We only care if it's a conflict.
+            existing_tokens = unique_samples[key].get("motion_tokens")
+            current_tokens = entry.get("motion_tokens")
+            if existing_tokens != current_tokens:
+                conflicts_found += 1
+                # We do nothing, effectively discarding this new conflicting sample.
+    
+    cleaned_data = list(unique_samples.values())
+    
+    print(f"Original samples: {len(entries)}")
+    print(f"Cleaned samples (unique (word, pid) pairs): {len(cleaned_data)}")
+    print(f"Removed {len(entries) - len(cleaned_data)} total samples. ({conflicts_found} were direct conflicts).")
 
-def build_motion_vocab(dataset: Dataset) -> Tuple[int, int]:
+    print("\n---> Extracting motion tokens from the full cleaned dataset...")
+    all_motion_tokens = set()
+    for entry in cleaned_data:
+        motion_tokens = entry.get("motion_tokens", "").strip().split()
+        for token in motion_tokens:
+            all_motion_tokens.add(f"<M{token}>")
+
+    unique_tokens = sorted(list(all_motion_tokens))
+    print(f"Found {len(unique_tokens)} unique motion tokens in the entire dataset.")
+    
+    return cleaned_data, unique_tokens
+
+class MotionDataset(Dataset):
+    """Dataset for Stage 1: Contains only motion token sequences."""
+    def __init__(self, data: List[Dict[str, Any]], tokenizer: AutoTokenizer, max_length: int = 256):
+        self.tokenizer = tokenizer
+        self.max_length = max_length
+        self.sequences = []
+
+        for item in data:
+            tokens_str = item.get("motion_tokens", "")
+            wrapped_tokens = " ".join([f"<M{t}>" for t in tokens_str.split()])
+            full_sequence = f"{M_START} {wrapped_tokens} {M_END}"
+            self.sequences.append(full_sequence)
+
+    def __len__(self):
+        return len(self.sequences)
+
+    def __getitem__(self, idx):
+        return self.tokenizer(
+            self.sequences[idx],
+            truncation=True,
+            max_length=self.max_length,
+            padding="max_length",
+            return_tensors="pt"
+        )
+
+class TextMotionDataset(Dataset):
+    """Dataset for Stage 2: Contains (prompt, motion_sequence) pairs."""
+    def __init__(self, data: List[Dict[str, Any]], tokenizer: AutoTokenizer, max_length: int = 256):
+        self.tokenizer = tokenizer
+        self.max_length = max_length
+        self.items = []
+
+        for item in data:
+            prompt = f"Instruction: Generate motion for word '{item['word']}' with variant '{item['participant_id']}'.\nMotion: "
+            
+            tokens_str = item.get("motion_tokens", "")
+            wrapped_tokens = " ".join([f"<M{t}>" for t in tokens_str.split()])
+            target_sequence = f"{M_START} {wrapped_tokens} {M_END}"
+            
+            full_text = prompt + target_sequence
+            
+            tokenized = self.tokenizer(
+                full_text,
+                truncation=True,
+                max_length=self.max_length,
+                padding="max_length",
+                return_tensors="pt"
+            )
+            
+            prompt_tokenized = self.tokenizer(prompt, return_tensors="pt")
+            prompt_len = prompt_tokenized.input_ids.shape[1]
+            
+            labels = tokenized['input_ids'].clone()
+            labels[0, :prompt_len] = -100
+            
+            self.items.append({
+                "input_ids": tokenized['input_ids'].squeeze(0),
+                "attention_mask": tokenized['attention_mask'].squeeze(0),
+                "labels": labels.squeeze(0)
+            })
+
+    def __len__(self):
+        return len(self.items)
+
+    def __getitem__(self, idx):
+        return self.items[idx]
+
+# ======================================================================================
+# Legacy utilities (kept for compatibility if needed, but mostly superseded)
+# ======================================================================================
+
+def build_motion_vocab(dataset):
     """
     Build motion vocabulary by finding max token ID
     Returns: (codebook_size, max_token_id)
@@ -29,81 +150,20 @@ def build_motion_vocab(dataset: Dataset) -> Tuple[int, int]:
         global_max_id = max(global_max_id, max_token_in_example(ex))
     
     codebook_size = global_max_id + 1
-    print(f"Max motion token id found: {global_max_id}")
-    print(f"Codebook size: {codebook_size}")
-    
     return codebook_size, global_max_id
-
-
-def ids_to_motion_specials(s: str) -> str:
-    """Convert space-separated IDs to motion special tokens"""
-    return " ".join(f"<motion_{x}>" for x in s.split())
-
 
 def motion_specials_to_ids(s: str) -> List[int]:
     """Extract motion IDs from special tokens"""
     toks = s.strip().split()
     ids = []
     for t in toks:
-        if t.startswith("<motion_"):
+        if t.startswith("<motion_") or (t.startswith("<M") and t.endswith(">") and t[2:-1].isdigit()):
+             # Handle both <motion_ID> and <MID> formats
             try:
-                ids.append(int(t[8:-1]))
+                if t.startswith("<motion_"):
+                    ids.append(int(t[8:-1]))
+                else:
+                    ids.append(int(t[2:-1]))
             except:
                 pass
     return ids
-
-
-def compute_length_stats(dataset: Dataset) -> Tuple[Dict[str, Dict[str, int]], int]:
-    """
-    Compute motion length statistics per prompt
-    Returns: (stats_by_text, global_median_length)
-    """
-    by_text = defaultdict(list)
-    for ex in dataset:
-        by_text[ex["text_query"]].append(len(ex["motion_tokens"].split()))
-    
-    stats = {}
-    all_lens = []
-    for k, arr in by_text.items():
-        arr_sorted = sorted(arr)
-        n = len(arr_sorted)
-        median = arr_sorted[n//2] if n % 2 == 1 else (arr_sorted[n//2 - 1] + arr_sorted[n//2]) // 2
-        stats[k] = {"median": median, "min": arr_sorted[0], "max": arr_sorted[-1]}
-        all_lens.extend(arr_sorted)
-    
-    all_lens = sorted(all_lens) or [16]
-    global_median = all_lens[len(all_lens)//2]
-    
-    return stats, global_median
-
-
-def build_prompt_vocab(dataset: Dataset) -> Dict[str, List[int]]:
-    """Build per-prompt vocabulary (whitelist of tokens that appear with each prompt)"""
-    table = defaultdict(set)
-    for ex in dataset:
-        for x in ex["motion_tokens"].split():
-            table[ex["text_query"]].add(int(x))
-    return {k: sorted(v) for k, v in table.items()}
-
-
-def make_splits(dataset: Dataset, mapper_fn, max_train_samples=None) -> Tuple[Dataset, Dataset]:
-    """
-    Create train/val splits and apply mapping function
-    """
-    split = dataset.train_test_split(test_size=0.1, seed=SEED)
-    
-    if max_train_samples is not None and max_train_samples < len(split["train"]):
-        split["train"] = split["train"].select(range(max_train_samples))
-    
-    if MAX_EVAL_SAMPLES is not None and MAX_EVAL_SAMPLES < len(split["test"]):
-        split["test"] = split["test"].select(range(MAX_EVAL_SAMPLES))
-    
-    train = split["train"].map(mapper_fn, remove_columns=split["train"].column_names, num_proc=2)
-    val = split["test"].map(mapper_fn, remove_columns=split["test"].column_names, num_proc=2)
-    
-    return train, val
-
-
-def check_has_participant_id(dataset: Dataset) -> bool:
-    """Check if dataset has participant_id column"""
-    return "participant_id" in dataset.column_names

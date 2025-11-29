@@ -18,91 +18,60 @@ DATA_JSON_PATH = os.environ.get(
     "DATA_JSON_PATH",
     os.path.join(DATA_DIR, "motion_llm_dataset.json"),
 )
-OUT_S1 = f"{WORK_DIR}/stage1_mlm"
-OUT_S2 = f"{WORK_DIR}/stage2_multitask"
-OUT_S3 = f"{WORK_DIR}/stage3_t2m_sft"
+
+# Directory Configuration
+# PIPELINE_OUTPUT_DIR matches test_overfit's default "./motion_gpt_full_model"
+PIPELINE_OUTPUT_DIR = os.environ.get("PIPELINE_OUTPUT_DIR", "./motion_gpt_full_model")
+METRICS_JSON_PATH = os.path.join(PIPELINE_OUTPUT_DIR, "metrics.json")
+CHECKPOINTS_DIR = os.path.join(PIPELINE_OUTPUT_DIR, "checkpoints")
 
 # Model configuration
-MODEL_NAME = "unsloth/Qwen3-0.6B"  # or "unsloth/gemma-3-1b-it"
-MAX_SEQ_LEN = 512
+MODEL_NAME = "Qwen/Qwen3-0.6B"  # Matches test_overfit.py
+MAX_SEQ_LEN = 512 # Kept from previous config, though test_overfit uses 256 in datasets
 DTYPE = torch.bfloat16 if torch.cuda.is_available() and torch.cuda.get_device_capability(0)[0] >= 8 else torch.float16
 
-# Training hyperparameters
-BATCH_TRAIN = 8
-BATCH_EVAL = 8
-GRAD_ACCUM = 8
-LR = 5e-5
-WARMUP = 0.03
-LOG_STEPS = 20
-EVAL_STEPS = 100
-SAVE_STEPS = 500
+# Evaluation Words (matches test_overfit.py)
+EVALUATION_WORDS = ["passport", "send", "library", "push"]
 
-# Epochs per stage
-EPOCHS_S1 = 5
-EPOCHS_S2 = 5
-EPOCHS_S3 = 5
+# Training Hyperparameters (matches test_overfit.py)
+# Stage 1
+S1_EPOCHS = 20
+S1_LR = 5e-5
+S1_BATCH_SIZE = 8
 
-# Sampling limits (None = use all data)
-MAX_TRAIN_SAMPLES_S1 = None
-MAX_TRAIN_SAMPLES_S2 = None
-MAX_TRAIN_SAMPLES_S3 = None
-MAX_EVAL_SAMPLES = 1000
+# Stage 2
+S2_EPOCHS = 20
+S2_LR = 2e-5
+S2_BATCH_SIZE = 8
 
-# LoRA configuration
-LORA_R = 16
-LORA_ALPHA = 16
-LORA_DROPOUT = 0.0
-LORA_TARGET_MODULES = ["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"]
-LORA_MODULES_TO_SAVE = ["embed_tokens", "lm_head"]
+# Inference Hyperparameters (matches test_overfit.py)
+INFERENCE_REPETITION_PENALTY = 1.2
+INFERENCE_TEMPERATURE = 0.7
+INFERENCE_TOP_K = 50
 
-# Generation parameters
-GEN_MAX_NEW_TOKENS = 256
-GEN_TEMPERATURE = 0.7
-GEN_TOP_P = 0.9
-GEN_TOP_K = 0
-GEN_NO_REPEAT_NGRAM_SIZE = 6
-GEN_REPETITION_PENALTY = 1.2
-GEN_END_LOGIT_SLOPE = 0.25
+# Special Tokens (matches test_overfit.py)
+M_START = "<M_START>"
+M_END = "<M_END>"
+PAD_TOKEN = "<PAD>"
 
-# Full pipeline (test_overfit parity) defaults
-PIPELINE_MODEL_NAME = os.environ.get("PIPELINE_MODEL_NAME", "Qwen/Qwen3-0.6B")
-PIPELINE_OUTPUT_DIR = os.environ.get("PIPELINE_OUTPUT_DIR", os.path.join(WORK_DIR, "motion_gpt_full_model"))
-_PIPELINE_EVAL_WORDS_RAW = os.environ.get("PIPELINE_EVAL_WORDS", "passport,send,library,push")
-PIPELINE_EVAL_WORDS = [w.strip() for w in _PIPELINE_EVAL_WORDS_RAW.split(",") if w.strip()]
-PIPELINE_EVAL_SAMPLE_LIMIT = int(os.environ.get("PIPELINE_EVAL_SAMPLE_LIMIT", "100"))
-PIPELINE_RUN_EVALS_ONLY = os.environ.get("PIPELINE_RUN_EVALS_ONLY", "false").lower() not in ("0", "false", "no", "off")
-PIPELINE_S1_EPOCHS = int(os.environ.get("PIPELINE_S1_EPOCHS", "20"))
-PIPELINE_S2_EPOCHS = int(os.environ.get("PIPELINE_S2_EPOCHS", "20"))
-PIPELINE_S1_LR = float(os.environ.get("PIPELINE_S1_LR", "5e-5"))
-PIPELINE_S2_LR = float(os.environ.get("PIPELINE_S2_LR", "2e-5"))
-PIPELINE_S1_BATCH = int(os.environ.get("PIPELINE_S1_BATCH", "8"))
-PIPELINE_S2_BATCH = int(os.environ.get("PIPELINE_S2_BATCH", "8"))
-PIPELINE_HF_STAGE2_SUBDIR = os.environ.get("PIPELINE_HF_STAGE2_SUBDIR", "stage2_v2")
-PIPELINE_FORCE_STAGE2_FROM_STAGE1 = os.environ.get("PIPELINE_FORCE_STAGE2_FROM_STAGE1", "false").lower() not in ("0", "false", "no", "off")
+# Hugging Face Hub Configuration
+HF_USE_HUB = True
+HF_TOKEN = os.environ.get("HUGGINGFACE_HUB_TOKEN") or os.environ.get("hf_auth_token")
+HF_USER = os.environ.get("HF_USER", "rdz-falcon") # Derived from test_overfit.py repo ids
+HF_STAGE1_REPO_ID = "rdz-falcon/SignMotionGPTfit-archive"
+HF_STAGE2_REPO_ID = "rdz-falcon/SignMotionGPTfit-archive"
+HF_PRIVATE_REPO = os.environ.get("HF_PRIVATE", "true").lower() != "false"
+FORCE_STAGE2_FROM_STAGE1_RAW = os.environ.get("FORCE_STAGE2_FROM_STAGE1", "false")
+FORCE_STAGE2_FROM_STAGE1 = str(FORCE_STAGE2_FROM_STAGE1_RAW).strip().lower() not in ("0", "false", "no", "off")
+HF_STAGE2_SAVE_SUBDIR = os.environ.get("HF_STAGE2_SAVE_SUBDIR", "stage2_v2")
+CHECKPOINT_UPLOAD_INTERVAL_EPOCHS = int(os.environ.get("HF_UPLOAD_INTERVAL_EPOCHS", "2"))
+HF_DISABLE_PROGRESS = os.environ.get("HF_DISABLE_PROGRESS", "true").lower() != "false"
 
-# System prompt
-SYSTEM_MSG = (
-    "You are a MotionGPT-style assistant for joint text–motion modeling.\n"
-    "Follow these rules:\n"
-    "1) For motion outputs, respond only with <MOT_BEGIN> <motion_*> ... <MOT_END> using space-separated <motion_ID> tokens; never output raw numbers.\n"
-    "2) Respect task markers: <T2M> for text-to-motion, <M2T> for motion-to-text, <DENOISE> for masked motion reconstruction.\n"
-    "3) Use participant token <PID_*> when present to personalize outputs.\n"
-    "4) For T2M/DENOISE, output only the motion span; for M2T, output only fluent text.\n"
-    "5) Do not echo system/user content; avoid extraneous text outside the required span.\n"
-    "6) Prefer realistic lengths and smoothness consistent with the dataset's typical sequences.\n"
-)
+# Evaluation controls
+RUN_EVALS_ONLY = False
+EVAL_SAMPLE_LIMIT = 100
 
-# Hugging Face Hub configuration
-# Set HF_TOKEN via environment or here for convenience (prefer environment for security).
-HF_TOKEN = os.environ.get("HUGGINGFACE_HUB_TOKEN", "")
-HF_USER = os.environ.get("HF_USER", "rdz-falcon")
-
-# Per-stage Hub repos (override via env if needed)
-HUB_REPO_S1 = os.environ.get("HUB_REPO_S1", f"{HF_USER}/signmotiongpt-stage1")
-HUB_REPO_S2 = os.environ.get("HUB_REPO_S2", f"{HF_USER}/signmotiongpt-stage2")
-HUB_REPO_S3 = os.environ.get("HUB_REPO_S3", f"{HF_USER}/signmotiongpt-stage3")
-
-# Held-out test evaluation defaults
+# Test Eval Config (from test_dataset_eval.py defaults)
 TEST_EVAL_OUTPUT_DIR = os.environ.get("TEST_EVAL_OUTPUT_DIR", PIPELINE_OUTPUT_DIR)
 TEST_EVAL_DOWNLOAD_DIR = os.environ.get(
     "TEST_EVAL_DOWNLOAD_DIR", os.path.join(WORK_DIR, "test_data", "downloads")
@@ -112,7 +81,7 @@ TEST_EVAL_EXTRACT_DIR = os.environ.get(
 )
 TEST_EVAL_SAMPLE_LIMIT = int(os.environ.get("TEST_EVAL_SAMPLE_LIMIT", "300"))
 TEST_EVAL_MAX_ZIPS = int(os.environ.get("TEST_EVAL_MAX_ZIPS", "500"))
-TEST_EVAL_HF_REPO = os.environ.get("TEST_EVAL_HF_REPO", f"{HF_USER}/SignMotionGPTfit-archive")
+TEST_EVAL_HF_REPO = os.environ.get("TEST_EVAL_HF_REPO", "rdz-falcon/SignMotionGPTfit-archive")
 TEST_EVAL_HF_SUBFOLDER = os.environ.get(
-    "TEST_EVAL_HF_SUBFOLDER", f"{PIPELINE_HF_STAGE2_SUBDIR}/latest"
+    "TEST_EVAL_HF_SUBFOLDER", f"{HF_STAGE2_SAVE_SUBDIR}/latest"
 )

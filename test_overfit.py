@@ -58,9 +58,9 @@ PAD_TOKEN = "<PAD>"
 # --- Hugging Face Hub Configuration ---
 # Provide HUGGINGFACE_HUB_TOKEN or hf_auth_token in environment for private repos.
 HF_USE_HUB = True
-hf_auth_token = os.getenv("hf_auth_token") or os.getenv("HUGGINGFACE_HUB_TOKEN")
-if HF_USE_HUB and hf_auth_token is None:
-    print("⚠️  hf_auth_token environment variable is not set; Hub sync will be disabled.")
+hf_auth_token = os.getenv("hf_auth_token")
+if hf_auth_token is None:
+    raise ValueError("hf_auth_token environment variable is not set")
 HF_STAGE1_REPO_ID = "rdz-falcon/SignMotionGPTfit-archive"
 HF_STAGE2_REPO_ID = "rdz-falcon/SignMotionGPTfit-archive"
 HF_PRIVATE_REPO = os.environ.get("HF_PRIVATE", "true").lower() != "false"

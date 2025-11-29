@@ -2,14 +2,48 @@
 Model and tokenizer initialization
 """
 import torch
+from typing import List, Set, Tuple
+from transformers import AutoModelForCausalLM, AutoTokenizer
 from unsloth import FastLanguageModel
-from typing import List, Set
 from config import (
     MODEL_NAME, MAX_SEQ_LEN, DTYPE,
     LORA_R, LORA_ALPHA, LORA_DROPOUT,
-    LORA_TARGET_MODULES, LORA_MODULES_TO_SAVE
+    LORA_TARGET_MODULES, LORA_MODULES_TO_SAVE,
+    PAD_TOKEN, M_START, M_END
 )
 
+# ======================================================================================
+# Logic from test_overfit.py (Standard Transformers)
+# ======================================================================================
+
+def setup_model_and_tokenizer_raw(model_name: str, motion_tokens: List[str]) -> Tuple[AutoModelForCausalLM, AutoTokenizer]:
+    """Loads the model and tokenizer, adding special and motion tokens (Standard Transformers)."""
+    print(f"\n---> Loading base model and tokenizer: {model_name}")
+    tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
+    model = AutoModelForCausalLM.from_pretrained(model_name, trust_remote_code=True)
+
+    # Add special tokens (matches test_overfit.py)
+    tokenizer.add_special_tokens({"pad_token": PAD_TOKEN, "additional_special_tokens": [M_START, M_END]})
+    
+    print(f"Adding {len(motion_tokens)} motion tokens to the tokenizer.")
+    tokenizer.add_tokens(motion_tokens, special_tokens=True)
+    
+    model.resize_token_embeddings(len(tokenizer))
+    model.config.pad_token_id = tokenizer.pad_token_id
+
+    return model, tokenizer
+
+def ensure_tokenizer_has_motion_tokens(tokenizer: AutoTokenizer, motion_tokens: List[str]) -> int:
+    """
+    Adds any missing motion tokens to the tokenizer. Returns number of tokens added.
+    """
+    tokenizer.add_special_tokens({"pad_token": PAD_TOKEN, "additional_special_tokens": [M_START, M_END]})
+    added = tokenizer.add_tokens(motion_tokens, special_tokens=True)
+    return added
+
+# ======================================================================================
+# Existing Logic (Unsloth / LoRA)
+# ======================================================================================
 
 def build_special_tokens(codebook_size: int, unique_pids: List[str] = None) -> List[str]:
     """
@@ -34,7 +68,7 @@ def build_special_tokens(codebook_size: int, unique_pids: List[str] = None) -> L
 
 def setup_model_and_tokenizer(codebook_size: int, unique_pids: List[str] = None):
     """
-    Initialize model and tokenizer with custom tokens
+    Initialize model and tokenizer with custom tokens (Unsloth LoRA)
     Returns: (model, tokenizer, new_token_ids)
     """
     # Build special tokens
