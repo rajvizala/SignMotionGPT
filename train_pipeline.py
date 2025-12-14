@@ -9,11 +9,15 @@ import json
 import argparse
 from types import SimpleNamespace
 import warnings
+from typing import Optional, List, Dict, Any, Tuple
+from collections import defaultdict
+import numpy as np
 
 # Import updated modules
 from config import (
     SEED, DATA_JSON_PATH, MODEL_NAME, PIPELINE_OUTPUT_DIR,
     HF_STAGE1_REPO_ID, HF_STAGE2_REPO_ID, HF_STAGE2_SAVE_SUBDIR,
+    HF_STAGE3_REPO_ID, HF_STAGE3_SAVE_SUBDIR,
     FORCE_STAGE2_FROM_STAGE1, HF_USE_HUB, HF_TOKEN,
     EVALUATION_WORDS, EVAL_SAMPLE_LIMIT, RUN_EVALS_ONLY,
     TEST_EVAL_OUTPUT_DIR, TEST_EVAL_DOWNLOAD_DIR, TEST_EVAL_EXTRACT_DIR,
@@ -22,22 +26,64 @@ from config import (
 from data import read_json_data, deduplicate_and_prepare_data, build_motion_vocab
 from model import setup_model_and_tokenizer_raw, ensure_tokenizer_has_motion_tokens
 from train import (
-    train_stage1_raw, train_stage2_raw, resolve_and_ensure_repo,
+    train_stage1_raw, train_stage2_raw, train_stage3_instruct_raw, resolve_and_ensure_repo,
     repo_has_stage_latest, load_model_and_tokenizer_from_hf,
     download_training_state, repo_get_latest_epoch_subfolder,
     load_model_and_tokenizer_from_hf_subfolder, download_training_state_from_subfolder
 )
 from metrics import (
     evaluate_metrics_encoder_style, run_inference_on_all_samples,
-    evaluate_metrics_motiongpt_style, save_side_by_side_visualizations
+    evaluate_metrics_motiongpt_style, save_side_by_side_visualizations,
+    evaluate_stage3_multiref_encoder_style,  # <-- add this
 )
 import test_dataset_eval
 
 # Suppress warnings
 warnings.filterwarnings("ignore")
 
+
+def parse_args():
+    p = argparse.ArgumentParser(description="Train SignMotionGPT pipeline stages (1/2/3) with HF resume support.")
+    p.add_argument(
+        "--stage",
+        type=str,
+        default=os.environ.get("TRAIN_STAGE", "all"),
+        choices=["1", "2", "3", "all"],
+        help="Which stage(s) to run: 1, 2, 3, or all (default: all).",
+    )
+    p.add_argument("--skip-eval", action="store_true", help="Skip evaluation/metrics after training.")
+    p.add_argument("--skip-test-eval", action="store_true", help="Skip held-out test dataset evaluation step.")
+    return p.parse_args()
+
+
+def _load_stage_from_hf(resolved_repo: str, stage_subdir: str):
+    """
+    Best-effort load of (model, tokenizer, start_epoch) from HF for a given stage folder.
+    Supports both {stage}/latest and fallback {stage}/epoch-XXX if latest is missing.
+    """
+    start_epoch = 0
+    loaded = None
+    if not resolved_repo:
+        return None, 0
+
+    if repo_has_stage_latest(resolved_repo, stage_subdir, HF_TOKEN):
+        loaded = load_model_and_tokenizer_from_hf(resolved_repo, stage_subdir, HF_TOKEN)
+        state = download_training_state(resolved_repo, stage_subdir, HF_TOKEN)
+        if state and isinstance(state.get("epoch_completed"), int):
+            start_epoch = state["epoch_completed"]
+        return loaded, start_epoch
+
+    latest_sub = repo_get_latest_epoch_subfolder(resolved_repo, stage_subdir, HF_TOKEN)
+    if latest_sub:
+        loaded = load_model_and_tokenizer_from_hf_subfolder(resolved_repo, latest_sub, HF_TOKEN)
+        state = download_training_state_from_subfolder(resolved_repo, latest_sub, HF_TOKEN)
+        if state and isinstance(state.get("epoch_completed"), int):
+            start_epoch = state["epoch_completed"]
+    return loaded, start_epoch
+
 def main():
     """Main function to run the entire pipeline matching test_overfit.py."""
+    args = parse_args()
     print("="*80)
     print("      Motion LLM Training Pipeline (Matches test_overfit.py)")
     print("="*80)
@@ -58,88 +104,114 @@ def main():
     # 2. Clean the ENTIRE dataset and get all tokens
     print("\n[2/6] Cleaning dataset...")
     cleaned_data, all_motion_tokens = deduplicate_and_prepare_data(all_entries)
+    unique_words = sorted({str(item.get("word", "")).lower().strip() for item in cleaned_data if str(item.get("word", "")).strip()})
+    print(f"\n📌 Unique words in cleaned dataset: {len(unique_words)}")
 
-    # 3. Stage 1: Initialize or resume from HF, then train
-    print("\n[3/6] Stage 1 Setup & Training...")
+    do_s1 = args.stage in ("1", "all")
+    do_s2 = args.stage in ("2", "all")
+    do_s3 = args.stage in ("3", "all")
+
+    # We'll track the "current" model/tokenizer as we progress through stages
+    current_model = None
+    tokenizer = None
+
+    # 3. Stage 1: Initialize or resume from HF, then train (optional)
+    motion_model = None
     resolved_stage1_repo = resolve_and_ensure_repo(HF_STAGE1_REPO_ID, HF_TOKEN) if HF_USE_HUB else None
-    start_epoch_s1 = 0
-    stage1_loaded = None
-    if resolved_stage1_repo:
-        if repo_has_stage_latest(resolved_stage1_repo, "stage1", HF_TOKEN):
-            stage1_loaded = load_model_and_tokenizer_from_hf(resolved_stage1_repo, "stage1", HF_TOKEN)
-            state_s1 = download_training_state(resolved_stage1_repo, "stage1", HF_TOKEN)
-            if state_s1 and isinstance(state_s1.get("epoch_completed"), int):
-                start_epoch_s1 = state_s1["epoch_completed"]
+    if do_s1:
+        print("\n[3/6] Stage 1 Setup & Training...")
+        stage1_loaded, start_epoch_s1 = _load_stage_from_hf(resolved_stage1_repo, "stage1")
+        if stage1_loaded:
+            base_model, tokenizer = stage1_loaded
+            added = ensure_tokenizer_has_motion_tokens(tokenizer, all_motion_tokens)
+            if added > 0:
+                base_model.resize_token_embeddings(len(tokenizer))
         else:
-            # Fallback: no 'latest' folder; select highest epoch-XXX
-            latest_s1_sub = repo_get_latest_epoch_subfolder(resolved_stage1_repo, "stage1", HF_TOKEN)
-            if latest_s1_sub:
-                stage1_loaded = load_model_and_tokenizer_from_hf_subfolder(resolved_stage1_repo, latest_s1_sub, HF_TOKEN)
-                state_s1 = download_training_state_from_subfolder(resolved_stage1_repo, latest_s1_sub, HF_TOKEN)
-                if state_s1 and isinstance(state_s1.get("epoch_completed"), int):
-                    start_epoch_s1 = state_s1["epoch_completed"]
+            base_model, tokenizer = setup_model_and_tokenizer_raw(MODEL_NAME, all_motion_tokens)
 
-    if stage1_loaded:
-        base_model, tokenizer = stage1_loaded
-        # Ensure tokenizer contains all motion tokens (add missing if dataset expanded)
-        added = ensure_tokenizer_has_motion_tokens(tokenizer, all_motion_tokens)
-        if added > 0:
-            base_model.resize_token_embeddings(len(tokenizer))
+        print(f"\nStarting Stage 1 training on {len(cleaned_data)} samples (resume from epoch {start_epoch_s1}).")
+        motion_model = train_stage1_raw(
+            base_model,
+            tokenizer,
+            cleaned_data,
+            device,
+            start_epoch=start_epoch_s1,
+            hf_repo_id=resolved_stage1_repo,
+        )
+        current_model = motion_model
     else:
-        base_model, tokenizer = setup_model_and_tokenizer_raw(MODEL_NAME, all_motion_tokens)
-
-    print(f"\nStarting Stage 1 training on {len(cleaned_data)} samples (resume from epoch {start_epoch_s1}).")
-    motion_model = train_stage1_raw(
-        base_model,
-        tokenizer,
-        cleaned_data,
-        device,
-        start_epoch=start_epoch_s1,
-        hf_repo_id=resolved_stage1_repo,
-    )
+        # If Stage 1 isn't being trained, set a safe baseline for downstream stages.
+        # We'll prefer downstream checkpoints when available (Stage2/Stage3 loaders below).
+        current_model, tokenizer = setup_model_and_tokenizer_raw(MODEL_NAME, all_motion_tokens)
 
     # 4. Stage 2: Initialize or resume from HF, then train
-    print("\n[4/6] Stage 2 Setup & Training...")
+    final_model = current_model
+    last_trained_stage = "stage1" if do_s1 else "base"
+
     resolved_stage2_repo = resolve_and_ensure_repo(HF_STAGE2_REPO_ID, HF_TOKEN) if HF_USE_HUB else None
-    start_epoch_s2 = 0
-    stage2_loaded = None
-    print(f"Stage 2 resume policy: FORCE_STAGE2_FROM_STAGE1={FORCE_STAGE2_FROM_STAGE1}, save_subdir='{HF_STAGE2_SAVE_SUBDIR}'")
-    
-    if not FORCE_STAGE2_FROM_STAGE1 and resolved_stage2_repo:
-        # Prefer loading from the configured Stage 2 save subdir (e.g., 'stage2_v2')
-        if repo_has_stage_latest(resolved_stage2_repo, HF_STAGE2_SAVE_SUBDIR, HF_TOKEN):
-            stage2_loaded = load_model_and_tokenizer_from_hf(resolved_stage2_repo, HF_STAGE2_SAVE_SUBDIR, HF_TOKEN)
-            state_s2 = download_training_state(resolved_stage2_repo, HF_STAGE2_SAVE_SUBDIR, HF_TOKEN)
-            if state_s2 and isinstance(state_s2.get("epoch_completed"), int):
-                start_epoch_s2 = state_s2["epoch_completed"]
-            print(f"Resuming Stage 2 from HF subfolder: {HF_STAGE2_SAVE_SUBDIR}/latest (epoch_completed={start_epoch_s2})")
+    if do_s2:
+        print("\n[4/6] Stage 2 Setup & Training...")
+        print(f"Stage 2 resume policy: FORCE_STAGE2_FROM_STAGE1={FORCE_STAGE2_FROM_STAGE1}, save_subdir='{HF_STAGE2_SAVE_SUBDIR}'")
+
+        stage2_loaded, start_epoch_s2 = (None, 0)
+        if not FORCE_STAGE2_FROM_STAGE1 and resolved_stage2_repo:
+            stage2_loaded, start_epoch_s2 = _load_stage_from_hf(resolved_stage2_repo, HF_STAGE2_SAVE_SUBDIR)
+
+        if stage2_loaded:
+            stage2_model, tokenizer = stage2_loaded
+            added2 = ensure_tokenizer_has_motion_tokens(tokenizer, all_motion_tokens)
+            if added2 > 0:
+                stage2_model.resize_token_embeddings(len(tokenizer))
         else:
-            latest_s2_sub = repo_get_latest_epoch_subfolder(resolved_stage2_repo, HF_STAGE2_SAVE_SUBDIR, HF_TOKEN)
-            if latest_s2_sub:
-                stage2_loaded = load_model_and_tokenizer_from_hf_subfolder(resolved_stage2_repo, latest_s2_sub, HF_TOKEN)
-                state_s2 = download_training_state_from_subfolder(resolved_stage2_repo, latest_s2_sub, HF_TOKEN)
-                if state_s2 and isinstance(state_s2.get("epoch_completed"), int):
-                    start_epoch_s2 = state_s2["epoch_completed"]
-                print(f"Resuming Stage 2 from HF subfolder: {latest_s2_sub} (epoch_completed={start_epoch_s2})")
+            stage2_model = motion_model if motion_model is not None else current_model
 
-    if stage2_loaded:
-        stage2_model, tokenizer = stage2_loaded
-        added2 = ensure_tokenizer_has_motion_tokens(tokenizer, all_motion_tokens)
-        if added2 > 0:
-            stage2_model.resize_token_embeddings(len(tokenizer))
-    else:
-        stage2_model = motion_model  # Start Stage 2 from Stage 1 model
+        print(f"\nStarting Stage 2 training on {len(cleaned_data)} samples (resume from epoch {start_epoch_s2}).")
+        final_model = train_stage2_raw(
+            stage2_model,
+            tokenizer,
+            cleaned_data,
+            device,
+            start_epoch=start_epoch_s2,
+            hf_repo_id=resolved_stage2_repo,
+            hf_stage_subdir=HF_STAGE2_SAVE_SUBDIR,
+        )
+        last_trained_stage = "stage2"
 
-    print(f"\nStarting Stage 2 training on {len(cleaned_data)} samples (resume from epoch {start_epoch_s2}).")
-    final_model = train_stage2_raw(
-        stage2_model,
-        tokenizer,
-        cleaned_data,
-        device,
-        start_epoch=start_epoch_s2,
-        hf_repo_id=resolved_stage2_repo,
-        hf_stage_subdir=HF_STAGE2_SAVE_SUBDIR,
-    )
+    # 4.5. Stage 3: Instruct tuning (optional)
+    resolved_stage3_repo = resolve_and_ensure_repo(HF_STAGE3_REPO_ID, HF_TOKEN) if HF_USE_HUB else None
+    if do_s3:
+        print("\n[4.5/6] Stage 3 Setup & Training (Instruct)...")
+        stage3_loaded, start_epoch_s3 = (None, 0)
+        if resolved_stage3_repo:
+            stage3_loaded, start_epoch_s3 = _load_stage_from_hf(resolved_stage3_repo, HF_STAGE3_SAVE_SUBDIR)
+
+        if stage3_loaded:
+            stage3_model, tokenizer = stage3_loaded
+            added3 = ensure_tokenizer_has_motion_tokens(tokenizer, all_motion_tokens)
+            if added3 > 0:
+                stage3_model.resize_token_embeddings(len(tokenizer))
+        else:
+            # Fallback chain: Stage 2 (already trained in this run) -> Stage 2 from HF -> current_model
+            stage3_model = final_model
+            if (not do_s2) and resolved_stage2_repo:
+                stage2_fallback_loaded, _ = _load_stage_from_hf(resolved_stage2_repo, HF_STAGE2_SAVE_SUBDIR)
+                if stage2_fallback_loaded:
+                    stage3_model, tokenizer = stage2_fallback_loaded
+                    added3b = ensure_tokenizer_has_motion_tokens(tokenizer, all_motion_tokens)
+                    if added3b > 0:
+                        stage3_model.resize_token_embeddings(len(tokenizer))
+
+        print(f"\nStarting Stage 3 training (instruct) (resume from epoch {start_epoch_s3}).")
+        final_model = train_stage3_instruct_raw(
+            stage3_model,
+            tokenizer,
+            cleaned_data,
+            device,
+            start_epoch=start_epoch_s3,
+            hf_repo_id=resolved_stage3_repo,
+            hf_stage_subdir=HF_STAGE3_SAVE_SUBDIR,
+        )
+        last_trained_stage = "stage3"
     
     # Save final model locally
     if not os.path.exists(PIPELINE_OUTPUT_DIR):
@@ -149,18 +221,49 @@ def main():
     print(f"Model saved to {PIPELINE_OUTPUT_DIR}")
 
     # 5. Evaluation on Specific Words
-    print("\n[5/6] Evaluation on Specific Words...")
-    print("--- Filtering data for evaluation on specific words ---")
-    evaluation_data = [item for item in cleaned_data if item['word'].lower() in EVALUATION_WORDS]
-    print(f"Found {len(evaluation_data)} samples for evaluation words: {EVALUATION_WORDS}")
+    if args.skip_eval:
+        print("\n[5/6] Evaluation skipped (--skip-eval).")
+        evaluation_data = []
+    else:
+        print("\n[5/6] Evaluation on Specific Words...")
+        print("--- Filtering data for evaluation on specific words ---")
+        evaluation_data = [item for item in cleaned_data if item['word'].lower() in EVALUATION_WORDS]
+        print(f"Found {len(evaluation_data)} samples for evaluation words: {EVALUATION_WORDS}")
 
     metrics_json_path = os.path.join(PIPELINE_OUTPUT_DIR, "metrics.json")
 
     # 6. Metrics-only mode or full flow
-    if RUN_EVALS_ONLY:
-        # Compute the 3 metrics using VQ-VAE encoder features and save to JSON
+    include_participant_in_prompt = (last_trained_stage != "stage3")
+
+    # Stage 3: use the new multi-ref encoder-only eval
+    if (not args.skip_eval) and (last_trained_stage == "stage3"):
+        stage3_metrics = evaluate_stage3_multiref_encoder_style(
+            final_model,
+            tokenizer,
+            evaluation_data,
+            device,
+            k_samples=10,
+            sample_limit=None,  # use all eval rows for those words
+        )
+
+        os.makedirs(PIPELINE_OUTPUT_DIR, exist_ok=True)
+        with open(metrics_json_path, "w", encoding="utf-8") as f:
+            json.dump(stage3_metrics, f, ensure_ascii=False, indent=2)
+        print(f"\n✅ Saved Stage 3 multi-ref metrics to {metrics_json_path}")
+
+        if RUN_EVALS_ONLY:
+            return
+
+        # Visualization: one GT (closest ref) vs GEN (best-of-K) per word
+        viz_dir = os.path.join(PIPELINE_OUTPUT_DIR, "html_visualizations")
+        save_side_by_side_visualizations(stage3_metrics.get("pairs_closest", []), viz_dir, limit=4)
+
+    # Stage 1/2: keep existing eval behavior
+    elif (not args.skip_eval) and RUN_EVALS_ONLY:
         metrics_enc = evaluate_metrics_encoder_style(
-            final_model, tokenizer, evaluation_data, device, sample_limit=EVAL_SAMPLE_LIMIT
+            final_model, tokenizer, evaluation_data, device,
+            sample_limit=EVAL_SAMPLE_LIMIT,
+            include_participant=include_participant_in_prompt,
         )
         os.makedirs(PIPELINE_OUTPUT_DIR, exist_ok=True)
         metrics_payload = {
@@ -181,19 +284,22 @@ def main():
         print(f"\n✅ Saved metrics to {metrics_json_path}")
         return
 
-    # Full flow: inference logs + MotionGPT-style metrics + encoder metrics + visualizations
-    run_inference_on_all_samples(final_model, tokenizer, evaluation_data, device)
-    metrics_token = evaluate_metrics_motiongpt_style(final_model, tokenizer, evaluation_data, all_motion_tokens, device)
-    # Also compute encoder-based 3 metrics
-    metrics_enc = evaluate_metrics_encoder_style(
-        final_model, tokenizer, evaluation_data, device, sample_limit=EVAL_SAMPLE_LIMIT
-    )
-    # Visualizations (skip if metrics-only)
-    viz_dir = os.path.join(PIPELINE_OUTPUT_DIR, "html_visualizations")
-    save_side_by_side_visualizations(metrics_token["pairs"], viz_dir, limit=4)
-    
+    elif not args.skip_eval:
+        run_inference_on_all_samples(final_model, tokenizer, evaluation_data, device, include_participant=include_participant_in_prompt)
+        metrics_token = evaluate_metrics_motiongpt_style(
+            final_model, tokenizer, evaluation_data, all_motion_tokens, device, include_participant=include_participant_in_prompt
+        )
+        metrics_enc = evaluate_metrics_encoder_style(
+            final_model, tokenizer, evaluation_data, device, sample_limit=EVAL_SAMPLE_LIMIT, include_participant=include_participant_in_prompt
+        )
+        viz_dir = os.path.join(PIPELINE_OUTPUT_DIR, "html_visualizations")
+        save_side_by_side_visualizations(metrics_token["pairs"], viz_dir, limit=4)
+
     # 7. Run Test Dataset Evaluation (test_dataset_eval.py)
-    print("\n[6/6] Running Evaluation on Held-out Test Dataset...")
+    if args.skip_test_eval:
+        print("\n[6/6] Held-out test dataset evaluation skipped (--skip-test-eval).")
+    else:
+        print("\n[6/6] Running Evaluation on Held-out Test Dataset...")
     try:
         # Construct args matching test_dataset_eval.parse_args
         eval_args = SimpleNamespace(
@@ -230,7 +336,10 @@ def main():
         # Let's check if we can use local_extracted_dir if it exists, otherwise drive download.
         # We will use a try-except block.
         
-        print("Calling test_dataset_eval.run_evaluation...")
+        if args.skip_test_eval:
+            eval_args = None
+        else:
+            print("Calling test_dataset_eval.run_evaluation...")
         # We need to provide either drive-url/id or local-extracted. 
         # We'll try to use the extracted dir if it has content, otherwise default to download if URL known?
         # Actually, since we don't have a drive URL in config (it was an arg), we might skip this if not set up?
@@ -249,7 +358,7 @@ def main():
              print("⚠️  Skipping test_dataset_eval: No local data found and no Drive URL configured.")
              eval_args = None
 
-        if eval_args:
+        if eval_args and (not args.skip_test_eval):
             test_dataset_eval.run_evaluation(eval_args)
             
     except Exception as e:

@@ -4,13 +4,18 @@ Model and tokenizer initialization
 import torch
 from typing import List, Set, Tuple
 from transformers import AutoModelForCausalLM, AutoTokenizer
-from unsloth import FastLanguageModel
 from config import (
     MODEL_NAME, MAX_SEQ_LEN, DTYPE,
-    LORA_R, LORA_ALPHA, LORA_DROPOUT,
-    LORA_TARGET_MODULES, LORA_MODULES_TO_SAVE,
     PAD_TOKEN, M_START, M_END
 )
+
+# LoRA-related configs (only used for Unsloth/LoRA pipeline, not raw training)
+# These are kept for backward compatibility but are not used in the primary pipeline
+LORA_R = 16
+LORA_ALPHA = 16
+LORA_DROPOUT = 0.05
+LORA_TARGET_MODULES = ["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"]
+LORA_MODULES_TO_SAVE = ["embed_tokens", "lm_head"]
 
 # ======================================================================================
 # Logic from test_overfit.py (Standard Transformers)
@@ -42,12 +47,32 @@ def ensure_tokenizer_has_motion_tokens(tokenizer: AutoTokenizer, motion_tokens: 
     return added
 
 # ======================================================================================
-# Existing Logic (Unsloth / LoRA)
+# Existing Logic (Unsloth / LoRA) - LEGACY, not used in primary pipeline
+# These functions are kept for backward compatibility only.
+# The primary pipeline uses setup_model_and_tokenizer_raw() above.
 # ======================================================================================
+
+# Lazy import for unsloth (optional dependency, only needed for LoRA pipeline)
+FastLanguageModel = None
+
+def _ensure_unsloth():
+    """Lazy load unsloth only when needed."""
+    global FastLanguageModel
+    if FastLanguageModel is None:
+        try:
+            from unsloth import FastLanguageModel as _FLM
+            FastLanguageModel = _FLM
+        except ImportError:
+            raise ImportError(
+                "unsloth is not installed. Install it with: pip install unsloth\n"
+                "Note: This is only needed for the LoRA pipeline, not the primary training pipeline."
+            )
+    return FastLanguageModel
+
 
 def build_special_tokens(codebook_size: int, unique_pids: List[str] = None) -> List[str]:
     """
-    Build all special tokens for motion vocabulary
+    Build all special tokens for motion vocabulary (legacy format)
     """
     # Motion tokens
     motion_tokens = [f"<motion_{i}>" for i in range(codebook_size)]
@@ -68,14 +93,20 @@ def build_special_tokens(codebook_size: int, unique_pids: List[str] = None) -> L
 
 def setup_model_and_tokenizer(codebook_size: int, unique_pids: List[str] = None):
     """
-    Initialize model and tokenizer with custom tokens (Unsloth LoRA)
+    Initialize model and tokenizer with custom tokens (Unsloth LoRA) - LEGACY
+    
+    NOTE: This is the OLD pipeline using Unsloth/LoRA. The primary pipeline now uses
+    setup_model_and_tokenizer_raw() which matches test_overfit.py exactly.
+    
     Returns: (model, tokenizer, new_token_ids)
     """
+    FLM = _ensure_unsloth()
+    
     # Build special tokens
     additional_special_tokens = build_special_tokens(codebook_size, unique_pids)
     
     # Load base model
-    model, tokenizer = FastLanguageModel.from_pretrained(
+    model, tokenizer = FLM.from_pretrained(
         model_name=MODEL_NAME,
         max_seq_length=MAX_SEQ_LEN,
         dtype=DTYPE,
@@ -100,7 +131,7 @@ def setup_model_and_tokenizer(codebook_size: int, unique_pids: List[str] = None)
     model.resize_token_embeddings(len(tokenizer))
     
     # Apply LoRA
-    model = FastLanguageModel.get_peft_model(
+    model = FLM.get_peft_model(
         model,
         r=LORA_R,
         lora_alpha=LORA_ALPHA,

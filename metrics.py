@@ -135,7 +135,20 @@ def generate_motion(model, tokenizer, prompt, device):
         motion_part = decoded
     return motion_part.strip()
 
-def _collect_eval_pairs(model, tokenizer, data, device) -> list[Tuple[str, str, str]]:
+def build_instruction_prompt(word: str, participant_id: Optional[str] = None, include_participant: bool = True) -> str:
+    """
+    Build the plain-text prompt used by the raw training/eval pipeline (Instruction/Motion format).
+
+    Stage 2-style: "word + participant_id"
+    Stage 3-style: "word only" (include_participant=False)
+    """
+    w = str(word)
+    if include_participant:
+        pid = "" if participant_id is None else str(participant_id)
+        return f"Instruction: Generate motion for word '{w}' with variant '{pid}'.\nMotion: "
+    return f"Instruction: Generate motion for word '{w}'.\nMotion: "
+
+def _collect_eval_pairs(model, tokenizer, data, device, include_participant: bool = True) -> list[Tuple[str, str, str]]:
     """
     Returns list of (word, participant_id, gt_sequence, generated_sequence) for each sample in data.
     """
@@ -144,7 +157,11 @@ def _collect_eval_pairs(model, tokenizer, data, device) -> list[Tuple[str, str, 
         gt_tokens_str = sample.get("motion_tokens", "")
         gt_wrapped = " ".join([f"<M{t}>" for t in gt_tokens_str.split()])
         gt_sequence = f"{M_START} {gt_wrapped} {M_END}"
-        prompt = f"Instruction: Generate motion for word '{sample['word']}' with variant '{sample['participant_id']}'.\nMotion: "
+        prompt = build_instruction_prompt(
+            word=sample.get("word", ""),
+            participant_id=sample.get("participant_id", ""),
+            include_participant=include_participant,
+        )
         generated_sequence = generate_motion(model, tokenizer, prompt, device)
         pid = str(sample.get("participant_id", ""))
         results.append((sample["word"], pid, gt_sequence, generated_sequence))
@@ -192,7 +209,7 @@ def _to_label_tensor3(acts: np.ndarray, labels: list[str]) -> np.ndarray:
         stacked.append(acts[idxs])
     return np.stack(stacked, axis=0)  # [L, K, D]
 
-def evaluate_metrics_motiongpt_style(model, tokenizer, eval_data, all_motion_tokens, device):
+def evaluate_metrics_motiongpt_style(model, tokenizer, eval_data, all_motion_tokens, device, include_participant: bool = True):
     """
     Computes:
       - Diversity: GT vs GEN (pair)
@@ -202,7 +219,7 @@ def evaluate_metrics_motiongpt_style(model, tokenizer, eval_data, all_motion_tok
     print("\n" + "="*80)
     print("      METRICS EVALUATION (FID, Diversity, Multimodality)")
     print("="*80)
-    pairs = _collect_eval_pairs(model, tokenizer, eval_data, device)
+    pairs = _collect_eval_pairs(model, tokenizer, eval_data, device, include_participant=include_participant)
     gt_acts, gen_acts, labels = _activations_from_pairs(pairs, all_motion_tokens)
     # Diversity
     diversity_times = min(200, max(4, gt_acts.shape[0] - 1))
@@ -296,6 +313,7 @@ def evaluate_metrics_encoder_style(
     vqvae_ckpt: Optional[str] = None,
     stats_path: Optional[str] = None,
     sample_limit: int = 100,
+    include_participant: bool = True,
 ):
     """
     Computes FID, Diversity, and MIM using VQ-VAE encoder pre-quantization features.
@@ -315,7 +333,7 @@ def evaluate_metrics_encoder_style(
         print(f"⚠️  Could not set up VQ-VAE encoder metrics: {exc}")
         return {}
     # Collect GT/GEN token sequences for pairs (limit to speed-up)
-    pairs = _collect_eval_pairs(model, tokenizer, eval_data[:sample_limit], device)
+    pairs = _collect_eval_pairs(model, tokenizer, eval_data[:sample_limit], device, include_participant=include_participant)
     # Build features
     gt_feats = []
     gen_feats = []
@@ -489,7 +507,7 @@ def save_side_by_side_visualizations(pairs: list[Tuple[str, str, str]], output_d
         except Exception as exc:
             print(f"⚠️  Error creating visualization for word '{pair[0]}': {exc}")
 
-def run_inference_on_all_samples(model, tokenizer, data, device):
+def run_inference_on_all_samples(model, tokenizer, data, device, include_participant: bool = True):
     """
     Runs inference on ALL available samples for the trained words and compares 
     each one to its specific ground truth.
@@ -544,14 +562,22 @@ def run_inference_on_all_samples(model, tokenizer, data, device):
         num_correct = 0
         
         for i, sample in enumerate(samples):
-            print(f"\n--- Testing Variant {i+1}/{len(samples)}: '{sample['participant_id']}' ---")
+            pid = sample.get("participant_id", "")
+            if include_participant:
+                print(f"\n--- Testing Variant {i+1}/{len(samples)}: '{pid}' ---")
+            else:
+                print(f"\n--- Testing Sample {i+1}/{len(samples)} (prompt is WORD-ONLY; PID ignored) ---")
             
             gt_tokens_str = sample.get("motion_tokens", "")
             gt_wrapped = " ".join([f"<M{t}>" for t in gt_tokens_str.split()])
             gt_sequence = f"{M_START} {gt_wrapped} {M_END}"
             print(f"Ground Truth:\n{gt_sequence}")
 
-            prompt = f"Instruction: Generate motion for word '{sample['word']}' with variant '{sample['participant_id']}'.\nMotion: "
+            prompt = build_instruction_prompt(
+                word=sample.get("word", ""),
+                participant_id=pid,
+                include_participant=include_participant,
+            )
             generated_sequence = generate_motion(model, tokenizer, prompt, device)
             print(f"\nLLM Generated:\n{generated_sequence}")
             
@@ -729,3 +755,326 @@ def eval_t2m_set(
     else:
         print("Eval T2M: no samples")
         return {}
+
+def _load_vqvae_helpers_for_metrics(device, vqvae_ckpt: Optional[str] = None, stats_path: Optional[str] = None):
+    """
+    Shared loader for Stage 3 multi-ref encoder-based evaluation.
+    Returns: (vq_model, mean, std, decode_tokens_to_params)
+    """
+    from visualize import load_vqvae, load_stats, decode_tokens_to_params, VQVAE_CHECKPOINT as DEFAULT_VQ, STATS_PATH as DEFAULT_STATS
+    vq_ckpt = vqvae_ckpt or os.getenv("VQVAE_CHECKPOINT", DEFAULT_VQ)
+    stats_p = stats_path or os.getenv("VQVAE_STATS_PATH", DEFAULT_STATS)
+    vq_model = load_vqvae(vq_ckpt, device=device)
+    mean, std = load_stats(stats_p)
+    return vq_model, mean, std, decode_tokens_to_params
+
+
+def _wrap_gt_sequence_from_sample(sample: Dict[str, Any]) -> str:
+    gt_tokens_str = str(sample.get("motion_tokens", "")).strip()
+    gt_wrapped = " ".join([f"<M{t}>" for t in gt_tokens_str.split()])
+    return f"{M_START} {gt_wrapped} {M_END}"
+
+
+def _sequence_to_encoder_feature(seq: str, vq_model, mean, std, device, decode_tokens_to_params) -> Optional[np.ndarray]:
+    """
+    seq: string that may contain <M123> tokens (and other text).
+    Returns L2-normalized encoder feature vector, or None on failure.
+    """
+    ids = _extract_ids_from_sequence(seq)
+    if len(ids) == 0:
+        return None
+    try:
+        params = decode_tokens_to_params(ids, vq_model, mean, std, device=device)
+        feat = _encode_params_to_feature(params, vq_model, mean, std, device)
+        return feat
+    except Exception:
+        return None
+
+
+def _min_l2_to_refs(x: np.ndarray, ref_mat: np.ndarray) -> Tuple[float, int]:
+    """
+    Returns (min_l2_distance, argmin_index) between x and rows of ref_mat.
+    Assumes both are float32 vectors, typically already L2-normalized.
+    """
+    d = np.linalg.norm(ref_mat - x.reshape(1, -1), axis=1)
+    j = int(np.argmin(d))
+    return float(d[j]), j
+
+
+def evaluate_stage3_multiref_encoder_style(
+    model,
+    tokenizer,
+    eval_data: List[Dict[str, Any]],
+    device,
+    *,
+    k_samples: int = 10,
+    vqvae_ckpt: Optional[str] = None,
+    stats_path: Optional[str] = None,
+    sample_limit: Optional[int] = None,
+    seed: int = SEED,
+):
+    """
+    Stage 3 (word-only, 1-to-many) evaluation using ONLY VQ-VAE encoder features.
+
+    Option C metrics:
+      - Quality-to-closest-ref:
+          * avg_min_feat_dist: mean over (word, k) of min L2 distance to any GT ref for that word
+          * avg_best_of_k_feat_dist: mean over words of best-of-K (min over k of min-ref distance)
+      - Distribution match:
+          * fid_per_word_mean: mean over words of FID(GT_feats(word), GEN_feats(word))
+          * fid_global: FID over concatenated GT feats vs concatenated GEN feats (all words)
+
+    Visualization helper output:
+      - pairs_closest: one pair per word using GEN(best-of-K) vs GT(closest-ref to that GEN), with GT participant_id preserved.
+    """
+    subset = eval_data[:sample_limit] if (isinstance(sample_limit, int) and sample_limit > 0) else eval_data
+
+    # Group by word (lower)
+    by_word: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
+    for ex in subset:
+        w = str(ex.get("word", "")).lower().strip()
+        if not w:
+            continue
+        by_word[w].append(ex)
+
+    if not by_word:
+        return {"error": "No valid words in eval_data.", "pairs_closest": [], "per_word": {}}
+
+    # Load VQ-VAE + stats + decoder
+    try:
+        vq_model, mean, std, decode_tokens_to_params = _load_vqvae_helpers_for_metrics(device, vqvae_ckpt=vqvae_ckpt, stats_path=stats_path)
+    except Exception as exc:
+        return {"error": f"Could not set up VQ-VAE encoder evaluation: {exc}", "pairs_closest": [], "per_word": {}}
+
+    per_word: Dict[str, Dict[str, Any]] = {}
+    pairs_closest: List[Tuple[str, str, str, str]] = []
+
+    all_gt_feats = []
+    all_gen_feats = []
+    all_exact_matches = []
+    all_gen_unique_ratios = []
+    all_ref_coverages = []
+    all_gen_diversities = []
+    all_ref_diversities = []
+
+    # Deterministic base RNG (generation is still stochastic, but this makes it repeatable run-to-run)
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
+
+    for word, samples in sorted(by_word.items(), key=lambda kv: kv[0]):
+        # Build GT ref feats for this word (ALL variants provided in eval_data)
+        gt_feats = []
+        gt_seqs = []
+        gt_pids = []
+        gt_id_keys = []
+        for s in samples:
+            gt_seq = _wrap_gt_sequence_from_sample(s)
+            feat = _sequence_to_encoder_feature(gt_seq, vq_model, mean, std, device, decode_tokens_to_params)
+            if feat is None:
+                continue
+            gt_feats.append(feat)
+            gt_seqs.append(gt_seq)
+            gt_pids.append(str(s.get("participant_id", "")))
+            gt_id_keys.append(tuple(_extract_ids_from_sequence(gt_seq)))
+
+        if len(gt_feats) < 2:
+            # Too few refs to compute per-word cov/FID robustly
+            per_word[word] = {
+                "n_refs": len(gt_feats),
+                "n_gens": 0,
+                "n_refs_unique": len(set(gt_id_keys)),
+                "avg_min_feat_dist": float("nan"),
+                "best_of_k_feat_dist": float("nan"),
+                "fid_word": float("nan"),
+                "exact_match_rate": float("nan"),
+                "n_gens_unique": 0,
+                "gen_unique_ratio": float("nan"),
+                "ref_coverage_ratio": float("nan"),
+                "ref_diversity_feat": float("nan"),
+                "gen_diversity_feat": float("nan"),
+                "note": "Too few GT references (need >=2 encoder-features).",
+            }
+            continue
+
+        gt_mat = np.stack(gt_feats, axis=0).astype(np.float32)
+        all_gt_feats.append(gt_mat)
+
+        # Reference diagnostics
+        gt_key_to_index: Dict[tuple, int] = {}
+        for j, key in enumerate(gt_id_keys):
+            if key not in gt_key_to_index:
+                gt_key_to_index[key] = j
+        n_refs_unique = len(gt_key_to_index)
+        # Mean pairwise distance in feature space (full, not sampled)
+        try:
+            diffs = gt_mat[:, None, :] - gt_mat[None, :, :]
+            dmat = np.linalg.norm(diffs, axis=2)
+            iu = np.triu_indices(dmat.shape[0], k=1)
+            ref_div_feat = float(np.mean(dmat[iu])) if len(iu[0]) > 0 else float("nan")
+        except Exception:
+            ref_div_feat = float("nan")
+
+        # Generate K samples for this word (word-only prompt)
+        prompt = build_instruction_prompt(word=word, participant_id=None, include_participant=False)
+
+        gen_feats = []
+        gen_seqs = []
+        gen_id_keys = []
+        min_dists = []
+        best_gen_i = None
+        best_gen_dist = float("inf")
+        best_gen_closest_ref_j = None
+        exact_matches = 0
+        matched_ref_keys = set()
+
+        for k in range(int(k_samples)):
+            # Make sampling reproducible per (word, k)
+            # (Python hash is salted per process, so avoid hash(word))
+            k_seed = int(seed + (k * 1000) + (sum(ord(c) for c in word) % 997))
+            random.seed(k_seed)
+            np.random.seed(k_seed % (2**32 - 1))
+            torch.manual_seed(k_seed)
+            if torch.cuda.is_available():
+                torch.cuda.manual_seed_all(k_seed)
+
+            gen_seq = generate_motion(model, tokenizer, prompt, device)
+            feat_g = _sequence_to_encoder_feature(gen_seq, vq_model, mean, std, device, decode_tokens_to_params)
+            if feat_g is None:
+                continue
+            gen_key = tuple(_extract_ids_from_sequence(gen_seq))
+            gen_id_keys.append(gen_key)
+            if gen_key in gt_key_to_index:
+                exact_matches += 1
+                matched_ref_keys.add(gen_key)
+
+            d_min, j = _min_l2_to_refs(feat_g, gt_mat)
+            gen_feats.append(feat_g)
+            gen_seqs.append(gen_seq)
+            min_dists.append(d_min)
+
+            if d_min < best_gen_dist:
+                best_gen_dist = d_min
+                best_gen_i = len(gen_feats) - 1
+                best_gen_closest_ref_j = j
+
+        if len(gen_feats) < 2:
+            per_word[word] = {
+                "n_refs": int(gt_mat.shape[0]),
+                "n_gens": len(gen_feats),
+                "n_refs_unique": n_refs_unique,
+                "avg_min_feat_dist": float("nan"),
+                "best_of_k_feat_dist": float("nan"),
+                "fid_word": float("nan"),
+                "exact_match_rate": float("nan"),
+                "n_gens_unique": len(set(gen_id_keys)),
+                "gen_unique_ratio": float("nan"),
+                "ref_coverage_ratio": float("nan"),
+                "ref_diversity_feat": ref_div_feat,
+                "gen_diversity_feat": float("nan"),
+                "note": "Too few valid generated samples (need >=2 encoder-features).",
+            }
+            continue
+
+        gen_mat = np.stack(gen_feats, axis=0).astype(np.float32)
+        all_gen_feats.append(gen_mat)
+
+        # Generation diagnostics
+        n_gens = int(gen_mat.shape[0])
+        n_gens_unique = len(set(gen_id_keys))
+        gen_unique_ratio = float(n_gens_unique / max(1, n_gens))
+        exact_match_rate = float(exact_matches / max(1, n_gens))
+        ref_coverage_ratio = float(len(matched_ref_keys) / max(1, n_refs_unique))
+        try:
+            diffs_g = gen_mat[:, None, :] - gen_mat[None, :, :]
+            dmat_g = np.linalg.norm(diffs_g, axis=2)
+            iu_g = np.triu_indices(dmat_g.shape[0], k=1)
+            gen_div_feat = float(np.mean(dmat_g[iu_g])) if len(iu_g[0]) > 0 else float("nan")
+        except Exception:
+            gen_div_feat = float("nan")
+
+        # Option C: quality-to-closest-ref
+        avg_min_dist = float(np.mean(min_dists)) if min_dists else float("nan")
+        best_of_k = float(np.min(min_dists)) if min_dists else float("nan")
+
+        # Option C: distribution match (per-word FID on encoder features)
+        try:
+            mu_g, cov_g = calculate_activation_statistics_np(gen_mat)
+            mu_r, cov_r = calculate_activation_statistics_np(gt_mat)
+            fid_word = float(calculate_frechet_distance_np(mu_r, cov_r, mu_g, cov_g))
+        except Exception:
+            fid_word = float("nan")
+
+        per_word[word] = {
+            "n_refs": int(gt_mat.shape[0]),
+            "n_gens": n_gens,
+            "n_refs_unique": n_refs_unique,
+            "avg_min_feat_dist": avg_min_dist,
+            "best_of_k_feat_dist": best_of_k,
+            "fid_word": fid_word,
+            "exact_match_rate": exact_match_rate,
+            "n_gens_unique": n_gens_unique,
+            "gen_unique_ratio": gen_unique_ratio,
+            "ref_coverage_ratio": ref_coverage_ratio,
+            "ref_diversity_feat": ref_div_feat,
+            "gen_diversity_feat": gen_div_feat,
+        }
+
+        all_exact_matches.append(exact_match_rate)
+        all_gen_unique_ratios.append(gen_unique_ratio)
+        all_ref_coverages.append(ref_coverage_ratio)
+        all_gen_diversities.append(gen_div_feat)
+        all_ref_diversities.append(ref_div_feat)
+
+        # Visualization pair: GEN(best-of-K) vs GT(closest ref to that GEN)
+        if best_gen_i is not None and best_gen_closest_ref_j is not None:
+            gt_seq_best = gt_seqs[best_gen_closest_ref_j]
+            gt_pid_best = gt_pids[best_gen_closest_ref_j]
+            gen_seq_best = gen_seqs[best_gen_i]
+            pairs_closest.append((word, gt_pid_best, gt_seq_best, gen_seq_best))
+
+    # Aggregate
+    # mean over words (only those with finite values)
+    def _mean_finite(xs: List[float]) -> float:
+        xs2 = [float(x) for x in xs if x is not None and np.isfinite(x)]
+        return float(np.mean(xs2)) if xs2 else float("nan")
+
+    avg_min_feat_dist = _mean_finite([v.get("avg_min_feat_dist") for v in per_word.values()])
+    avg_best_of_k_feat_dist = _mean_finite([v.get("best_of_k_feat_dist") for v in per_word.values()])
+    fid_per_word_mean = _mean_finite([v.get("fid_word") for v in per_word.values()])
+    exact_match_rate_mean = _mean_finite(all_exact_matches)
+    gen_unique_ratio_mean = _mean_finite(all_gen_unique_ratios)
+    ref_coverage_ratio_mean = _mean_finite(all_ref_coverages)
+    gen_diversity_feat_mean = _mean_finite(all_gen_diversities)
+    ref_diversity_feat_mean = _mean_finite(all_ref_diversities)
+
+    # Global FID (concatenate all feats)
+    try:
+        gt_all = np.concatenate(all_gt_feats, axis=0) if all_gt_feats else None
+        gen_all = np.concatenate(all_gen_feats, axis=0) if all_gen_feats else None
+        if gt_all is None or gen_all is None or gt_all.shape[0] < 2 or gen_all.shape[0] < 2:
+            fid_global = float("nan")
+        else:
+            mu_g, cov_g = calculate_activation_statistics_np(gen_all)
+            mu_r, cov_r = calculate_activation_statistics_np(gt_all)
+            fid_global = float(calculate_frechet_distance_np(mu_r, cov_r, mu_g, cov_g))
+    except Exception:
+        fid_global = float("nan")
+
+    return {
+        "source": "vqvae_encoder_stage3_multiref",
+        "k_samples": int(k_samples),
+        "avg_min_feat_dist": avg_min_feat_dist,
+        "avg_best_of_k_feat_dist": avg_best_of_k_feat_dist,
+        "fid_per_word_mean": fid_per_word_mean,
+        "fid_global": fid_global,
+        "exact_match_rate_mean": exact_match_rate_mean,
+        "gen_unique_ratio_mean": gen_unique_ratio_mean,
+        "ref_coverage_ratio_mean": ref_coverage_ratio_mean,
+        "ref_diversity_feat_mean": ref_diversity_feat_mean,
+        "gen_diversity_feat_mean": gen_diversity_feat_mean,
+        "per_word": per_word,
+        "pairs_closest": pairs_closest,
+    }

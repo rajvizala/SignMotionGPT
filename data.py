@@ -133,6 +133,95 @@ class TextMotionDataset(Dataset):
     def __getitem__(self, idx):
         return self.items[idx]
 
+
+class InstructTextMotionDataset(Dataset):
+    """
+    Dataset for Stage 3 (Instruct): word-only prompt, no participant_id.
+
+    Key idea: the mapping is 1-to-many (word -> multiple motion variants). To avoid always training
+    against the same variant, each access returns a RANDOM variant for that word.
+
+    - __len__ = (#unique_words * draws_per_word)
+    - __getitem__ picks word = words[idx % #unique_words] then samples a random variant.
+    """
+
+    def __init__(
+        self,
+        data: List[Dict[str, Any]],
+        tokenizer: AutoTokenizer,
+        max_length: int = 256,
+        draws_per_word: int = 1,
+    ):
+        self.tokenizer = tokenizer
+        self.max_length = max_length
+        self.draws_per_word = max(1, int(draws_per_word))
+
+        # Group variants by word (lowercased for consistency)
+        by_word: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
+        for item in data:
+            w = str(item.get("word", "")).lower().strip()
+            if not w:
+                continue
+            by_word[w].append(item)
+
+        self.words = sorted(by_word.keys())
+        self.by_word = by_word
+
+        # Pre-tokenize the prompt for each word (prompt length is needed for label masking)
+        self._prompt_by_word: Dict[str, str] = {}
+        self._prompt_len_by_word: Dict[str, int] = {}
+        for w in self.words:
+            prompt = f"Instruction: Generate motion for word '{w}'.\nMotion: "
+            self._prompt_by_word[w] = prompt
+            prompt_tok = self.tokenizer(prompt, return_tensors="pt")
+            self._prompt_len_by_word[w] = int(prompt_tok.input_ids.shape[1])
+
+        # Pre-tokenize FULL prompt+target for each variant (so __getitem__ is fast)
+        # Store as list per word of dicts: {input_ids, attention_mask, labels}
+        self._items_by_word: Dict[str, List[Dict[str, torch.Tensor]]] = {}
+        for w in self.words:
+            prompt = self._prompt_by_word[w]
+            prompt_len = self._prompt_len_by_word[w]
+            items_for_word: List[Dict[str, torch.Tensor]] = []
+
+            for item in self.by_word[w]:
+                tokens_str = item.get("motion_tokens", "")
+                wrapped_tokens = " ".join([f"<M{t}>" for t in str(tokens_str).split()])
+                target_sequence = f"{M_START} {wrapped_tokens} {M_END}"
+                full_text = prompt + target_sequence
+
+                tokenized = self.tokenizer(
+                    full_text,
+                    truncation=True,
+                    max_length=self.max_length,
+                    padding="max_length",
+                    return_tensors="pt",
+                )
+
+                labels = tokenized["input_ids"].clone()
+                labels[0, :prompt_len] = -100
+
+                items_for_word.append(
+                    {
+                        "input_ids": tokenized["input_ids"].squeeze(0),
+                        "attention_mask": tokenized["attention_mask"].squeeze(0),
+                        "labels": labels.squeeze(0),
+                    }
+                )
+
+            self._items_by_word[w] = items_for_word
+
+    def __len__(self):
+        return len(self.words) * self.draws_per_word
+
+    def __getitem__(self, idx):
+        if not self.words:
+            raise IndexError("InstructTextMotionDataset is empty (no valid words).")
+        w = self.words[idx % len(self.words)]
+        items = self._items_by_word[w]
+        # Randomly sample a variant each time
+        return random.choice(items)
+
 # ======================================================================================
 # Legacy utilities (kept for compatibility if needed, but mostly superseded)
 # ======================================================================================

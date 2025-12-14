@@ -23,6 +23,7 @@ from config import (
     HUB_REPO_S1, HUB_REPO_S2, HUB_REPO_S3, HF_TOKEN,
     CHECKPOINTS_DIR, HF_USE_HUB, CHECKPOINT_UPLOAD_INTERVAL_EPOCHS,
     S1_BATCH_SIZE, S1_LR, S1_EPOCHS, S2_BATCH_SIZE, S2_LR, S2_EPOCHS,
+    S3_BATCH_SIZE, S3_LR, S3_EPOCHS, S3_DRAWS_PER_WORD,
     PAD_TOKEN, M_START, M_END
 )
 
@@ -465,6 +466,101 @@ def train_stage2_raw(
     print("\n✅ Stage 2 Training Complete.")
     return model
 
+
+def train_stage3_instruct_raw(
+    model,
+    tokenizer,
+    data: List[Dict[str, Any]],
+    device,
+    start_epoch: int = 0,
+    hf_repo_id: Optional[str] = None,
+    hf_stage_subdir: str = "stage_3_instruct",
+):
+    """
+    Stage 3 (Instruct): word-only prompt (no participant_id), 1-to-many mapping.
+    Each step samples a random motion variant for the word as the supervised target.
+    """
+    from data import InstructTextMotionDataset  # Import here to avoid circular imports
+
+    print("\n" + "="*80)
+    print("      STAGE 3: INSTRUCT TUNING (WORD-ONLY, NO PARTICIPANT ID)")
+    print(f"      Training on {len({str(d.get('word','')).lower().strip() for d in data if str(d.get('word','')).strip()})} unique words.")
+    print("="*80)
+
+    dataset = InstructTextMotionDataset(data, tokenizer, draws_per_word=S3_DRAWS_PER_WORD)
+    dataloader = DataLoader(dataset, batch_size=S3_BATCH_SIZE, shuffle=True)
+
+    optimizer = AdamW(model.parameters(), lr=S3_LR)
+    model.to(device)
+    model.train()
+
+    # Try to resume optimizer if we resumed from HF
+    token = HF_TOKEN
+    if hf_repo_id and start_epoch > 0 and HF_USE_HUB and token:
+        opt_path = download_optimizer_state(hf_repo_id, hf_stage_subdir, token)
+        if opt_path is not None:
+            try:
+                optimizer.load_state_dict(torch.load(opt_path, map_location=device))
+                print("↩️  Resumed optimizer state for Stage 3 from HF.")
+            except Exception as exc:
+                print(f"⚠️  Failed to load optimizer state for Stage 3: {exc}")
+
+    for epoch in range(start_epoch, S3_EPOCHS):
+        total_loss = 0.0
+        total_batches = len(dataloader)
+        epoch_start_time = time.time()
+        step_interval = max(1, total_batches // 50)  # ~2% progress updates
+
+        for i, batch in enumerate(dataloader, 1):
+            optimizer.zero_grad()
+
+            input_ids = batch["input_ids"].to(device)
+            attention_mask = batch["attention_mask"].to(device)
+            labels = batch["labels"].to(device)
+
+            outputs = model(input_ids=input_ids, attention_mask=attention_mask, labels=labels)
+            loss = outputs.loss
+            loss.backward()
+            optimizer.step()
+            total_loss += float(loss.item())
+
+            # Progress with ETA
+            if i == 1 or (i % step_interval == 0) or (i == total_batches):
+                elapsed = time.time() - epoch_start_time
+                est_total = (elapsed / i) * total_batches
+                eta = est_total - elapsed
+                pct = (i / total_batches) * 100.0
+                print(
+                    f"\r[Stage 3] Epoch {epoch+1}/{S3_EPOCHS} - "
+                    f"{i}/{total_batches} ({pct:.1f}%) - ETA {_format_seconds(eta)}",
+                    end="",
+                    flush=True,
+                )
+
+        print()
+        avg_loss = total_loss / max(1, len(dataloader))
+        print(f"--- End of Epoch {epoch+1}/{S3_EPOCHS}, Average Loss: {avg_loss:.4f} ---")
+
+        # Save checkpoint locally every epoch; push to HF only at interval or final epoch
+        push_this_epoch = ((epoch + 1) % CHECKPOINT_UPLOAD_INTERVAL_EPOCHS == 0) or ((epoch + 1) == S3_EPOCHS)
+        repo_for_epoch = hf_repo_id if push_this_epoch else None
+        save_and_push_checkpoint(
+            stage=hf_stage_subdir,
+            epoch_index_zero_based=epoch,
+            model=model,
+            tokenizer=tokenizer,
+            optimizer=optimizer,
+            avg_loss=avg_loss,
+            dataloader_len=len(dataloader),
+            batch_size=S3_BATCH_SIZE,
+            total_epochs=S3_EPOCHS,
+            repo_id=repo_for_epoch,
+            hf_auth_token=token,
+        )
+
+    print("\n✅ Stage 3 Training Complete.")
+    return model
+
 # ======================================================================================
 # Existing Utilities
 # ======================================================================================
@@ -728,17 +824,33 @@ def save_model_to_hub(model, tokenizer, repo_id: str, stage_name: str):
 
 def load_model_from_hub(repo_id: str):
     """
-    Load model and tokenizer from HuggingFace Hub
-    """
-    from unsloth import FastLanguageModel
-    from config import MAX_SEQ_LEN, DTYPE
+    Load model and tokenizer from HuggingFace Hub.
     
-    print(f"\nLoading model from HuggingFace Hub: {repo_id}")
-    model, tokenizer = FastLanguageModel.from_pretrained(
-        model_name=repo_id,
-        max_seq_length=MAX_SEQ_LEN,
-        dtype=DTYPE,
-        load_in_4bit=True,
-    )
-    print(f"Successfully loaded model from {repo_id}")
-    return model, tokenizer
+    NOTE: This is a LEGACY function for the Unsloth/LoRA pipeline.
+    For the primary pipeline (matching test_overfit.py), use 
+    load_model_and_tokenizer_from_hf() instead.
+    """
+    try:
+        from unsloth import FastLanguageModel
+        from config import MAX_SEQ_LEN, DTYPE
+        
+        print(f"\nLoading model from HuggingFace Hub (Unsloth): {repo_id}")
+        model, tokenizer = FastLanguageModel.from_pretrained(
+            model_name=repo_id,
+            max_seq_length=MAX_SEQ_LEN,
+            dtype=DTYPE,
+            load_in_4bit=True,
+        )
+        print(f"Successfully loaded model from {repo_id}")
+        return model, tokenizer
+    except ImportError:
+        # Fallback to standard transformers if unsloth not installed
+        print(f"\nLoading model from HuggingFace Hub (transformers): {repo_id}")
+        tokenizer = AutoTokenizer.from_pretrained(repo_id, trust_remote_code=True)
+        model = AutoModelForCausalLM.from_pretrained(repo_id, trust_remote_code=True)
+        if tokenizer.pad_token is None:
+            tokenizer.add_special_tokens({"pad_token": PAD_TOKEN})
+        model.resize_token_embeddings(len(tokenizer))
+        model.config.pad_token_id = tokenizer.pad_token_id
+        print(f"Successfully loaded model from {repo_id}")
+        return model, tokenizer
