@@ -286,10 +286,12 @@ def _to_label_tensor3(acts: np.ndarray, labels: List[str]) -> np.ndarray:
     label_to_indices: Dict[str, List[int]] = {}
     for idx, lbl in enumerate(labels):
         label_to_indices.setdefault(lbl, []).append(idx)
+    # Multimodality requires >=2 samples per label. Filter out labels that appear only once.
+    label_to_indices = {k: v for k, v in label_to_indices.items() if len(v) >= 2}
     counts = [len(v) for v in label_to_indices.values()]
     if not counts:
-        raise ValueError("No labels available for multimodality computation.")
-    min_count = max(2, min(counts))
+        raise ValueError("No labels with >=2 samples available for multimodality computation.")
+    min_count = min(counts)  # guaranteed >= 2
     stacked = []
     for lbl in sorted(label_to_indices.keys()):
         stacked.append(acts[label_to_indices[lbl][:min_count]])
@@ -326,7 +328,15 @@ def extract_ids_from_sequence(seq: str) -> List[int]:
 
 def generate_motion_text(model, tokenizer, word: str, device: torch.device) -> str:
     model.eval()
-    prompt = f"Instruction: Generate motion for word '{word}' with variant 'unknown'.\nMotion: "
+    # Support Stage 3 (word-only) prompts. Stage 2 format includes a "variant" string.
+    include_participant = getattr(tokenizer, "_include_participant_in_prompt", None)
+    # If not set on tokenizer, fall back to args override via model attribute, else default to Stage 2 style.
+    if include_participant is None:
+        include_participant = getattr(model, "_include_participant_in_prompt", True)
+    if include_participant:
+        prompt = f"Instruction: Generate motion for word '{word}' with variant 'unknown'.\nMotion: "
+    else:
+        prompt = f"Instruction: Generate motion for word '{word}'.\nMotion: "
     inputs = tokenizer(prompt, return_tensors="pt").to(device)
     with torch.no_grad():
         output = model.generate(
@@ -391,7 +401,7 @@ def run_evaluation(args: argparse.Namespace) -> Dict[str, object]:
     os.makedirs(args.output_dir, exist_ok=True)
     metrics_path = os.path.join(args.output_dir, "metrics_test.json")
 
-    print(f"Loading Stage 2 model from HF: {args.hf_repo_id} (subfolder='{args.hf_subfolder}')")
+    print(f"Loading model from HF: {args.hf_repo_id} (subfolder='{args.hf_subfolder}')")
     tokenizer = AutoTokenizer.from_pretrained(args.hf_repo_id, subfolder=args.hf_subfolder, trust_remote_code=True)
     model = AutoModelForCausalLM.from_pretrained(args.hf_repo_id, subfolder=args.hf_subfolder, trust_remote_code=True)
     if tokenizer.pad_token is None:
@@ -399,6 +409,15 @@ def run_evaluation(args: argparse.Namespace) -> Dict[str, object]:
     model.resize_token_embeddings(len(tokenizer))
     model.config.pad_token_id = tokenizer.pad_token_id
     model.to(device)
+    # Stage 3 support: allow caller to force word-only prompt (no PID/variant in prompt)
+    include_participant_in_prompt = bool(getattr(args, "include_participant_in_prompt", True))
+    try:
+        setattr(model, "_include_participant_in_prompt", include_participant_in_prompt)
+        setattr(tokenizer, "_include_participant_in_prompt", include_participant_in_prompt)
+    except Exception:
+        pass
+    k_samples = int(getattr(args, "k_samples", 1))
+    k_samples = max(1, k_samples)
 
     load_vqvae, load_stats, decode_tokens_to_params, DEFAULT_VQ, DEFAULT_STATS = import_visualize_helpers()
     vq_ckpt = args.vqvae_ckpt if args.vqvae_ckpt else os.getenv("VQVAE_CHECKPOINT", DEFAULT_VQ)
@@ -434,7 +453,8 @@ def run_evaluation(args: argparse.Namespace) -> Dict[str, object]:
 
     gt_features: List[np.ndarray] = []
     gen_features: List[np.ndarray] = []
-    labels: List[str] = []
+    labels_gt: List[str] = []
+    labels_gen: List[str] = []
 
     for idx, (word, pkl_path) in enumerate(samples, 1):
         params_gt = load_smplx_params_from_pkl(pkl_path)
@@ -450,39 +470,47 @@ def run_evaluation(args: argparse.Namespace) -> Dict[str, object]:
             print(f"Skipping {pkl_path}: empty GT feature.")
             continue
 
-        gen_text = generate_motion_text(model, tokenizer, word, device)
-        token_ids = extract_ids_from_sequence(gen_text)
-        if not token_ids:
-            print(f"Skipping GEN for '{word}': no motion tokens produced.")
-            continue
-        try:
-            params_gen = decode_tokens_to_params(token_ids, vq_model, mean, std, device=device)
-        except Exception as exc:
-            print(f"Skipping GEN for '{word}': decode failed ({exc}).")
-            continue
-        feat_gen = _encode_params_to_feature(params_gen, vq_model, mean, std, device)
-        if feat_gen is None:
-            print(f"Skipping GEN for '{word}': empty GEN feature.")
+        gt_features.append(feat_gt)
+        labels_gt.append(word)
+
+        # Stage 3: generate K samples per test item (word-only prompt if include_participant_in_prompt=False)
+        n_kept = 0
+        for _k in range(k_samples):
+            gen_text = generate_motion_text(model, tokenizer, word, device)
+            token_ids = extract_ids_from_sequence(gen_text)
+            if not token_ids:
+                continue
+            try:
+                params_gen = decode_tokens_to_params(token_ids, vq_model, mean, std, device=device)
+            except Exception:
+                continue
+            feat_gen = _encode_params_to_feature(params_gen, vq_model, mean, std, device)
+            if feat_gen is None:
+                continue
+            gen_features.append(feat_gen)
+            labels_gen.append(word)
+            n_kept += 1
+        if n_kept == 0:
+            # No valid generated samples for this test item; drop its GT as well to avoid skewing
+            gt_features.pop()
+            labels_gt.pop()
             continue
 
-        gt_features.append(feat_gt)
-        gen_features.append(feat_gen)
-        labels.append(word)
         if idx % 25 == 0:
             print(f"Processed {idx} samples...")
 
     if len(gt_features) < 5 or len(gen_features) < 5:
         print("⚠️  Not enough samples to compute stable metrics; results may be noisy.")
 
-    gt_feats = np.stack(gt_features, axis=0)
-    gen_feats = np.stack(gen_features, axis=0)
+    gt_feats = np.stack(gt_features, axis=0) if gt_features else np.zeros((0, 1), dtype=np.float32)
+    gen_feats = np.stack(gen_features, axis=0) if gen_features else np.zeros((0, 1), dtype=np.float32)
 
     diversity_gt = calculate_diversity_np(gt_feats, diversity_times=min(200, max(4, gt_feats.shape[0] - 1)))
     diversity_gen = calculate_diversity_np(gen_feats, diversity_times=min(200, max(4, gen_feats.shape[0] - 1)))
 
     try:
-        gt_lbl_tensor = _to_label_tensor3(gt_feats, labels)
-        gen_lbl_tensor = _to_label_tensor3(gen_feats, labels)
+        gt_lbl_tensor = _to_label_tensor3(gt_feats, labels_gt)
+        gen_lbl_tensor = _to_label_tensor3(gen_feats, labels_gen)
         mim_gt = calculate_multimodality_np(
             gt_lbl_tensor, multimodality_times=min(20, max(3, gt_lbl_tensor.shape[1] - 1))
         )

@@ -53,7 +53,36 @@ def parse_args():
     )
     p.add_argument("--skip-eval", action="store_true", help="Skip evaluation/metrics after training.")
     p.add_argument("--skip-test-eval", action="store_true", help="Skip held-out test dataset evaluation step.")
+    # Held-out test dataset inputs (forwarded to test_dataset_eval.py)
+    p.add_argument("--test-local-extracted-dir", type=str, default=None, help="Directory containing extracted `video_data.pkl` files.")
+    p.add_argument("--test-drive-url", type=str, default=None, help="Google Drive folder URL containing the held-out test zips.")
+    p.add_argument("--test-drive-id", type=str, default=None, help="Google Drive folder ID containing the held-out test zips.")
+    p.add_argument("--test-hf-repo-id", type=str, default=TEST_EVAL_HF_REPO, help="HF repo for test eval model loading.")
+    p.add_argument("--test-hf-subfolder", type=str, default=TEST_EVAL_HF_SUBFOLDER, help="HF subfolder checkpoint for test eval model loading.")
+    p.add_argument("--test-sample-limit", type=int, default=TEST_EVAL_SAMPLE_LIMIT, help="Max held-out samples for test eval.")
+    p.add_argument("--test-max-zips", type=int, default=TEST_EVAL_MAX_ZIPS, help="Max zip archives to extract if downloading from Drive.")
     return p.parse_args()
+
+
+def _dir_contains_video_pkl(path: str) -> bool:
+    try:
+        for root, _dirs, files in os.walk(path):
+            if "video_data.pkl" in files:
+                return True
+        return False
+    except Exception:
+        return False
+
+
+def _dir_contains_zip_files(path: str) -> bool:
+    try:
+        for root, _dirs, files in os.walk(path):
+            for f in files:
+                if f.lower().endswith(".zip"):
+                    return True
+        return False
+    except Exception:
+        return False
 
 
 def _load_stage_from_hf(resolved_repo: str, stage_subdir: str):
@@ -300,69 +329,63 @@ def main():
         print("\n[6/6] Held-out test dataset evaluation skipped (--skip-test-eval).")
     else:
         print("\n[6/6] Running Evaluation on Held-out Test Dataset...")
-    try:
-        # Construct args matching test_dataset_eval.parse_args
-        eval_args = SimpleNamespace(
-            drive_url=None,
-            drive_id=None,
-            local_extracted_dir=None, # Will assume user needs to configure this or it uses defaults if not provided
-            # Note: test_dataset_eval requires one of drive/local. We can try to rely on defaults or skip if not configured.
-            # We will set download_dir and extract_dir from config.
-            download_dir=TEST_EVAL_DOWNLOAD_DIR,
-            extract_dir=TEST_EVAL_EXTRACT_DIR,
-            max_zips=TEST_EVAL_MAX_ZIPS,
-            hf_repo_id=TEST_EVAL_HF_REPO,
-            hf_subfolder=TEST_EVAL_HF_SUBFOLDER,
-            vqvae_ckpt=None,
-            stats_path=None,
-            output_dir=TEST_EVAL_OUTPUT_DIR,
-            sample_limit=TEST_EVAL_SAMPLE_LIMIT,
-            seed=SEED
-        )
-        
-        # For this pipeline, we might want to pass the *currently loaded* model instead of reloading from HF?
-        # test_dataset_eval.run_evaluation loads from HF. 
-        # The prompt asked to "incorporate... code of test_dataset_eval.py".
-        # Ideally we pass the model object, but run_evaluation is written to load from HF.
-        # Given we just saved and pushed (if enabled), loading from HF is fine. 
-        # If we haven't pushed (HF_USE_HUB=False), run_evaluation might fail if it tries to load from HF.
-        # However, the prompt implies using test_overfit.py training setup which pushes to HF.
-        
-        # Critical fix: If we want to use the *local* model we just trained, we should modify test_dataset_eval or pass it.
-        # But test_dataset_eval.run_evaluation doesn't accept model arg.
-        # For now, we'll attempt to run it as designed (loading from HF).
-        # If HF_USE_HUB is False, this step might fail.
-        
-        # Let's check if we can use local_extracted_dir if it exists, otherwise drive download.
-        # We will use a try-except block.
-        
-        if args.skip_test_eval:
-            eval_args = None
-        else:
-            print("Calling test_dataset_eval.run_evaluation...")
-        # We need to provide either drive-url/id or local-extracted. 
-        # We'll try to use the extracted dir if it has content, otherwise default to download if URL known?
-        # Actually, since we don't have a drive URL in config (it was an arg), we might skip this if not set up?
-        # But the user said "include the code".
-        
-        # We'll default to using the extract dir if it exists, otherwise we might need to ask or skip.
-        # Let's assume the user has data or we use the default drive-id if known (it wasn't in the provided file).
-        # Wait, test_dataset_eval.py has mutually exclusive required group.
-        # I'll add a fallback: if TEST_EVAL_EXTRACT_DIR exists and has files, use it.
-        
-        if os.path.exists(TEST_EVAL_EXTRACT_DIR) and os.listdir(TEST_EVAL_EXTRACT_DIR):
-             eval_args.local_extracted_dir = TEST_EVAL_EXTRACT_DIR
-        else:
-             # We don't have a drive URL hardcoded. 
-             # We will mock the arg to fail gracefully or print a message.
-             print("⚠️  Skipping test_dataset_eval: No local data found and no Drive URL configured.")
-             eval_args = None
+    if not args.skip_test_eval:
+        try:
+            # Construct args matching test_dataset_eval.parse_args requirements:
+            # must provide exactly one of {drive_url, drive_id, local_extracted_dir}.
+            local_dir = args.test_local_extracted_dir
+            if (not local_dir) and os.path.isdir(TEST_EVAL_EXTRACT_DIR) and _dir_contains_video_pkl(TEST_EVAL_EXTRACT_DIR):
+                local_dir = TEST_EVAL_EXTRACT_DIR
 
-        if eval_args and (not args.skip_test_eval):
-            test_dataset_eval.run_evaluation(eval_args)
-            
-    except Exception as e:
-        print(f"⚠️  Test dataset evaluation failed: {e}")
+            drive_url = args.test_drive_url
+            drive_id = args.test_drive_id
+
+            # If user didn't provide anything, skip with a clear message
+            if not local_dir and not drive_url and not drive_id:
+                print("⚠️  Skipping test_dataset_eval: provide --test-local-extracted-dir OR --test-drive-url/--test-drive-id.")
+            else:
+                # Special case: user provided a "local dir" that contains zips (not extracted yet).
+                # `test_dataset_eval.run_evaluation` expects local_extracted_dir to contain video_data.pkl somewhere underneath.
+                if local_dir and os.path.isdir(local_dir) and (not _dir_contains_video_pkl(local_dir)) and _dir_contains_zip_files(local_dir):
+                    extract_root = os.path.join(TEST_EVAL_EXTRACT_DIR, "from_local_zips")
+                    os.makedirs(extract_root, exist_ok=True)
+                    print(f"Detected zip archives in local dir (no video_data.pkl found). Extracting to: {extract_root}")
+                    zips = test_dataset_eval.list_zip_files(local_dir)
+                    if not zips:
+                        print("⚠️  No zip files found under --test-local-extracted-dir.")
+                    else:
+                        # Extract and then point evaluation to the extraction root
+                        test_dataset_eval.extract_zip_files(zips, extract_root, limit=args.test_max_zips)
+                        local_dir = extract_root
+
+                print("Calling test_dataset_eval.run_evaluation...")
+                # If user didn't override the default test HF subfolder and we just ran Stage 3,
+                # prefer evaluating the Stage 3 checkpoint.
+                hf_subfolder = args.test_hf_subfolder
+                if (last_trained_stage == "stage3") and (hf_subfolder == TEST_EVAL_HF_SUBFOLDER):
+                    hf_subfolder = f"{HF_STAGE3_SAVE_SUBDIR}/latest"
+
+                eval_args = SimpleNamespace(
+                    drive_url=drive_url,
+                    drive_id=drive_id,
+                    local_extracted_dir=local_dir,
+                    download_dir=TEST_EVAL_DOWNLOAD_DIR,
+                    extract_dir=TEST_EVAL_EXTRACT_DIR,
+                    max_zips=args.test_max_zips,
+                    hf_repo_id=args.test_hf_repo_id,
+                    hf_subfolder=hf_subfolder,
+                    vqvae_ckpt=None,
+                    stats_path=None,
+                    output_dir=TEST_EVAL_OUTPUT_DIR,
+                    sample_limit=args.test_sample_limit,
+                    seed=SEED,
+                    # Stage 3-specific test eval: word-only prompt + K samples per test item
+                    include_participant_in_prompt=(last_trained_stage != "stage3"),
+                    k_samples=(10 if last_trained_stage == "stage3" else 1),
+                )
+                test_dataset_eval.run_evaluation(eval_args)
+        except Exception as e:
+            print(f"⚠️  Test dataset evaluation failed: {e}")
 
     print("\n" + "="*60)
     print("Training pipeline complete!")

@@ -851,6 +851,11 @@ def evaluate_stage3_multiref_encoder_style(
 
     all_gt_feats = []
     all_gen_feats = []
+    # For Stage-3 "classic" metrics (Diversity/MIM) computed on VQ-VAE encoder features
+    gt_feat_list: List[np.ndarray] = []
+    gt_labels: List[str] = []
+    gen_feat_list: List[np.ndarray] = []
+    gen_labels: List[str] = []
     all_exact_matches = []
     all_gen_unique_ratios = []
     all_ref_coverages = []
@@ -901,6 +906,9 @@ def evaluate_stage3_multiref_encoder_style(
 
         gt_mat = np.stack(gt_feats, axis=0).astype(np.float32)
         all_gt_feats.append(gt_mat)
+        for f in gt_feats:
+            gt_feat_list.append(np.asarray(f, dtype=np.float32))
+            gt_labels.append(word)
 
         # Reference diagnostics
         gt_key_to_index: Dict[tuple, int] = {}
@@ -980,6 +988,9 @@ def evaluate_stage3_multiref_encoder_style(
 
         gen_mat = np.stack(gen_feats, axis=0).astype(np.float32)
         all_gen_feats.append(gen_mat)
+        for f in gen_feats:
+            gen_feat_list.append(np.asarray(f, dtype=np.float32))
+            gen_labels.append(word)
 
         # Generation diagnostics
         n_gens = int(gen_mat.shape[0])
@@ -1050,6 +1061,50 @@ def evaluate_stage3_multiref_encoder_style(
     gen_diversity_feat_mean = _mean_finite(all_gen_diversities)
     ref_diversity_feat_mean = _mean_finite(all_ref_diversities)
 
+    # Stage-3 "classic" trio (Diversity/MIM) on encoder features.
+    # These aggregate over ALL valid generated samples across all words (i.e., mean over K).
+    try:
+        if len(gt_feat_list) >= 2:
+            gt_all_for_div = np.stack(gt_feat_list, axis=0)
+            diversity_times = min(200, max(4, gt_all_for_div.shape[0] - 1))
+            diversity_gt = calculate_diversity_np(gt_all_for_div, diversity_times=diversity_times)
+        else:
+            diversity_gt = float("nan")
+    except Exception:
+        diversity_gt = float("nan")
+
+    try:
+        if len(gen_feat_list) >= 2:
+            gen_all_for_div = np.stack(gen_feat_list, axis=0)
+            diversity_times = min(200, max(4, gen_all_for_div.shape[0] - 1))
+            diversity_gen = calculate_diversity_np(gen_all_for_div, diversity_times=diversity_times)
+        else:
+            diversity_gen = float("nan")
+    except Exception:
+        diversity_gen = float("nan")
+
+    try:
+        if len(gt_feat_list) >= 2:
+            gt_all_for_mim = np.stack(gt_feat_list, axis=0)
+            gt_lbl_tensor = _to_label_tensor3(gt_all_for_mim, gt_labels)
+            mim_times = min(20, max(3, gt_lbl_tensor.shape[1] - 1))
+            mim_gt = calculate_multimodality_np(gt_lbl_tensor, multimodality_times=mim_times)
+        else:
+            mim_gt = float("nan")
+    except Exception:
+        mim_gt = float("nan")
+
+    try:
+        if len(gen_feat_list) >= 2:
+            gen_all_for_mim = np.stack(gen_feat_list, axis=0)
+            gen_lbl_tensor = _to_label_tensor3(gen_all_for_mim, gen_labels)
+            mim_times = min(20, max(3, gen_lbl_tensor.shape[1] - 1))
+            mim_gen = calculate_multimodality_np(gen_lbl_tensor, multimodality_times=mim_times)
+        else:
+            mim_gen = float("nan")
+    except Exception:
+        mim_gen = float("nan")
+
     # Global FID (concatenate all feats)
     try:
         gt_all = np.concatenate(all_gt_feats, axis=0) if all_gt_feats else None
@@ -1070,6 +1125,14 @@ def evaluate_stage3_multiref_encoder_style(
         "avg_best_of_k_feat_dist": avg_best_of_k_feat_dist,
         "fid_per_word_mean": fid_per_word_mean,
         "fid_global": fid_global,
+        "diversity": {
+            "ground_truth": diversity_gt,
+            "model": diversity_gen,
+        },
+        "multimodality": {
+            "ground_truth": mim_gt,
+            "model": mim_gen,
+        },
         "exact_match_rate_mean": exact_match_rate_mean,
         "gen_unique_ratio_mean": gen_unique_ratio_mean,
         "ref_coverage_ratio_mean": ref_coverage_ratio_mean,
