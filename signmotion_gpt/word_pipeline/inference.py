@@ -1,9 +1,8 @@
 """
-Inference script for generating motion tokens from text prompts.
-Updated to match the train_pipeline.py / test_overfit.py logic.
+Word-level inference for generating motion tokens from text prompts.
 
-Usage:
-    python inference.py --prompt "walking forward" --stage 3
+CLI wrapper:
+    python scripts/infer_motion.py --prompt "walking forward" --stage 3
 """
 import os
 import argparse
@@ -11,21 +10,21 @@ import torch
 import random
 from pathlib import Path
 
-from config import (
+from signmotion_gpt.common.config import (
     MODEL_NAME, PIPELINE_OUTPUT_DIR, CHECKPOINTS_DIR,
     OUT_S1, OUT_S2, OUT_S3, M_START, M_END,
     INFERENCE_TEMPERATURE, INFERENCE_TOP_K, INFERENCE_REPETITION_PENALTY
 )
-from data import read_json_data, deduplicate_and_prepare_data
-from model import setup_model_and_tokenizer_raw, ensure_tokenizer_has_motion_tokens
-from metrics import generate_motion, build_instruction_prompt
+from signmotion_gpt.word_pipeline.data import read_json_data, deduplicate_and_prepare_data
+from signmotion_gpt.word_pipeline.model import setup_model_and_tokenizer_raw, ensure_tokenizer_has_motion_tokens
+from signmotion_gpt.evaluation.metrics import generate_motion, build_instruction_prompt
 
 def load_trained_model(stage: int, device: torch.device):
     """
     Load a trained model from a specific stage checkpoint.
     """
     # 1. Load data to get all motion tokens (needed for vocabulary resizing)
-    from config import DATA_JSON_PATH
+    from signmotion_gpt.common.config import DATA_JSON_PATH
     all_entries = read_json_data(DATA_JSON_PATH)
     cleaned_data, all_motion_tokens = deduplicate_and_prepare_data(all_entries)
 
@@ -35,7 +34,7 @@ def load_trained_model(stage: int, device: torch.device):
     load_dir = stage_dirs.get(stage)
     
     if not load_dir or not os.path.exists(load_dir):
-        print(f"⚠️  Stage {stage} specific directory not found at {load_dir}. Trying {PIPELINE_OUTPUT_DIR}...")
+        print(f"[Warning]  Stage {stage} specific directory not found at {load_dir}. Trying {PIPELINE_OUTPUT_DIR}...")
         load_dir = PIPELINE_OUTPUT_DIR
 
     if not os.path.exists(load_dir):
@@ -94,9 +93,9 @@ def inference(
         })
         if available_pids:
             pid = random.choice(available_pids)
-            print(f"🎲 No PID provided for Stage {stage}. Randomly selected '{pid}' from {len(available_pids)} variants.")
+            print(f"[Info] No PID provided for Stage {stage}. Randomly selected '{pid}' from {len(available_pids)} variants.")
         else:
-            print(f"⚠️  Word '{prompt}' not found in training dataset. Defaulting to empty PID.")
+            print(f"[Warning]  Word '{prompt}' not found in training dataset. Defaulting to empty PID.")
             pid = ""
 
     full_prompt = build_instruction_prompt(
@@ -121,7 +120,7 @@ def inference(
         output_path.parent.mkdir(parents=True, exist_ok=True)
         with open(output_path, 'w', encoding="utf-8") as f:
             f.write(generated)
-        print(f"\n✅ Output saved to: {output_file}")
+        print(f"\n[OK] Output saved to: {output_file}")
     
     return generated
 

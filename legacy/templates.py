@@ -2,8 +2,8 @@
 Prompt templates and mapping functions for different training stages
 """
 import random
-from data import ids_to_motion_specials
-from config import SYSTEM_MSG, SEED
+from signmotion_gpt.word_pipeline.data import ids_to_motion_specials
+from signmotion_gpt.common.config import SYSTEM_MSG, SEED
 
 random.seed(SEED)
 

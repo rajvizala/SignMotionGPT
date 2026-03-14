@@ -14,7 +14,7 @@ from collections import defaultdict
 import numpy as np
 
 # Import updated modules
-from config import (
+from signmotion_gpt.common.config import (
     SEED, DATA_JSON_PATH, MODEL_NAME, PIPELINE_OUTPUT_DIR,
     HF_STAGE1_REPO_ID, HF_STAGE2_REPO_ID, HF_STAGE2_SAVE_SUBDIR,
     HF_STAGE3_REPO_ID, HF_STAGE3_SAVE_SUBDIR,
@@ -23,20 +23,20 @@ from config import (
     TEST_EVAL_OUTPUT_DIR, TEST_EVAL_DOWNLOAD_DIR, TEST_EVAL_EXTRACT_DIR,
     TEST_EVAL_SAMPLE_LIMIT, TEST_EVAL_MAX_ZIPS, TEST_EVAL_HF_REPO, TEST_EVAL_HF_SUBFOLDER
 )
-from data import read_json_data, deduplicate_and_prepare_data, build_motion_vocab
-from model import setup_model_and_tokenizer_raw, ensure_tokenizer_has_motion_tokens
-from train import (
+from signmotion_gpt.word_pipeline.data import read_json_data, deduplicate_and_prepare_data, build_motion_vocab
+from signmotion_gpt.word_pipeline.model import setup_model_and_tokenizer_raw, ensure_tokenizer_has_motion_tokens
+from signmotion_gpt.word_pipeline.train import (
     train_stage1_raw, train_stage2_raw, train_stage3_instruct_raw, resolve_and_ensure_repo,
     repo_has_stage_latest, load_model_and_tokenizer_from_hf,
     download_training_state, repo_get_latest_epoch_subfolder,
     load_model_and_tokenizer_from_hf_subfolder, download_training_state_from_subfolder
 )
-from metrics import (
+from signmotion_gpt.evaluation.metrics import (
     evaluate_metrics_encoder_style, run_inference_on_all_samples,
     evaluate_metrics_motiongpt_style, save_side_by_side_visualizations,
     evaluate_stage3_multiref_encoder_style,  # <-- add this
 )
-import test_dataset_eval
+from signmotion_gpt.evaluation import test_dataset_eval
 
 # Suppress warnings
 warnings.filterwarnings("ignore")
@@ -134,7 +134,7 @@ def main():
     print("\n[2/6] Cleaning dataset...")
     cleaned_data, all_motion_tokens = deduplicate_and_prepare_data(all_entries)
     unique_words = sorted({str(item.get("word", "")).lower().strip() for item in cleaned_data if str(item.get("word", "")).strip()})
-    print(f"\n📌 Unique words in cleaned dataset: {len(unique_words)}")
+    print(f"\n[Info] Unique words in cleaned dataset: {len(unique_words)}")
 
     do_s1 = args.stage in ("1", "all")
     do_s2 = args.stage in ("2", "all")
@@ -278,7 +278,7 @@ def main():
         os.makedirs(PIPELINE_OUTPUT_DIR, exist_ok=True)
         with open(metrics_json_path, "w", encoding="utf-8") as f:
             json.dump(stage3_metrics, f, ensure_ascii=False, indent=2)
-        print(f"\n✅ Saved Stage 3 multi-ref metrics to {metrics_json_path}")
+        print(f"\n[OK] Saved Stage 3 multi-ref metrics to {metrics_json_path}")
 
         if RUN_EVALS_ONLY:
             return
@@ -310,7 +310,7 @@ def main():
         }
         with open(metrics_json_path, "w", encoding="utf-8") as f:
             json.dump(metrics_payload, f, ensure_ascii=False, indent=2)
-        print(f"\n✅ Saved metrics to {metrics_json_path}")
+        print(f"\n[OK] Saved metrics to {metrics_json_path}")
         return
 
     elif not args.skip_eval:
@@ -342,7 +342,7 @@ def main():
 
             # If user didn't provide anything, skip with a clear message
             if not local_dir and not drive_url and not drive_id:
-                print("⚠️  Skipping test_dataset_eval: provide --test-local-extracted-dir OR --test-drive-url/--test-drive-id.")
+                print("[Warning]  Skipping test_dataset_eval: provide --test-local-extracted-dir OR --test-drive-url/--test-drive-id.")
             else:
                 # Special case: user provided a "local dir" that contains zips (not extracted yet).
                 # `test_dataset_eval.run_evaluation` expects local_extracted_dir to contain video_data.pkl somewhere underneath.
@@ -352,7 +352,7 @@ def main():
                     print(f"Detected zip archives in local dir (no video_data.pkl found). Extracting to: {extract_root}")
                     zips = test_dataset_eval.list_zip_files(local_dir)
                     if not zips:
-                        print("⚠️  No zip files found under --test-local-extracted-dir.")
+                        print("[Warning]  No zip files found under --test-local-extracted-dir.")
                     else:
                         # Extract and then point evaluation to the extraction root
                         test_dataset_eval.extract_zip_files(zips, extract_root, limit=args.test_max_zips)
@@ -385,7 +385,7 @@ def main():
                 )
                 test_dataset_eval.run_evaluation(eval_args)
         except Exception as e:
-            print(f"⚠️  Test dataset evaluation failed: {e}")
+            print(f"[Warning]  Test dataset evaluation failed: {e}")
 
     print("\n" + "="*60)
     print("Training pipeline complete!")

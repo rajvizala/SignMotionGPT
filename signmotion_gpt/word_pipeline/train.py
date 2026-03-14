@@ -17,7 +17,7 @@ from transformers import TrainingArguments, Trainer, AutoModelForCausalLM, AutoT
 from transformers.trainer_callback import TrainerCallback
 from huggingface_hub import HfApi, upload_folder, snapshot_download, hf_hub_download
 
-from config import (
+from signmotion_gpt.common.config import (
     BATCH_TRAIN, BATCH_EVAL, GRAD_ACCUM, LR, WARMUP,
     LOG_STEPS, EVAL_STEPS, SAVE_STEPS, SEED, DTYPE,
     HUB_REPO_S1, HUB_REPO_S2, HUB_REPO_S3, HF_TOKEN,
@@ -53,14 +53,14 @@ def resolve_and_ensure_repo(repo_id: str, hf_auth_token: Optional[str] = None) -
         return None
     token = hf_auth_token or HF_TOKEN
     if not token:
-        print("⚠️  HF token not found. Set HUGGINGFACE_HUB_TOKEN to enable Hub sync.")
+        print("[Warning]  HF token not found. Set HUGGINGFACE_HUB_TOKEN to enable Hub sync.")
         return None
     api = HfApi()
     try:
         who = api.whoami(token=token)
         namespace = who.get("name") or (who.get("orgs", [None])[0] if isinstance(who.get("orgs"), list) else None)
     except Exception as exc:
-        print(f"⚠️  Unable to resolve HF namespace: {exc}")
+        print(f"[Warning]  Unable to resolve HF namespace: {exc}")
         namespace = None
     if "/" not in repo_id and namespace:
         full_repo_id = f"{namespace}/{repo_id}"
@@ -75,7 +75,7 @@ def resolve_and_ensure_repo(repo_id: str, hf_auth_token: Optional[str] = None) -
             exist_ok=True,
         )
     except Exception as exc:
-        print(f"⚠️  create_repo failed (may already exist): {exc}")
+        print(f"[Warning]  create_repo failed (may already exist): {exc}")
     return full_repo_id
 
 def repo_has_stage_latest(repo_id: str, stage: str, hf_auth_token: Optional[str] = None) -> bool:
@@ -88,7 +88,7 @@ def repo_has_stage_latest(repo_id: str, stage: str, hf_auth_token: Optional[str]
         files = api.list_repo_files(repo_id=repo_id, repo_type="model", token=token)
         return any(path.startswith(f"{stage}/latest/") and path.endswith("config.json") for path in files)
     except Exception as exc:
-        print(f"⚠️  Could not list files for {repo_id}: {exc}")
+        print(f"[Warning]  Could not list files for {repo_id}: {exc}")
         return False
 
 def repo_list_epoch_numbers(repo_id: str, stage: str, hf_auth_token: Optional[str] = None) -> List[int]:
@@ -102,7 +102,7 @@ def repo_list_epoch_numbers(repo_id: str, stage: str, hf_auth_token: Optional[st
     try:
         files = api.list_repo_files(repo_id=repo_id, repo_type="model", token=token)
     except Exception as exc:
-        print(f"⚠️  Could not list files for {repo_id}: {exc}")
+        print(f"[Warning]  Could not list files for {repo_id}: {exc}")
         return []
     epoch_numbers: List[int] = []
     pattern = re.compile(rf"^{re.escape(stage)}/epoch-(\d+)/config\.json$")
@@ -136,7 +136,7 @@ def load_model_and_tokenizer_from_hf_subfolder(repo_id: str, subfolder: str, hf_
         tokenizer = AutoTokenizer.from_pretrained(repo_id, subfolder=subfolder, trust_remote_code=True)
         model = AutoModelForCausalLM.from_pretrained(repo_id, subfolder=subfolder, trust_remote_code=True)
     except Exception as exc:
-        print(f"⚠️  Failed to load model/tokenizer from subfolder '{subfolder}': {exc}")
+        print(f"[Warning]  Failed to load model/tokenizer from subfolder '{subfolder}': {exc}")
         return None
     if tokenizer.pad_token is None:
         tokenizer.add_special_tokens({"pad_token": PAD_TOKEN})
@@ -280,11 +280,11 @@ def save_and_push_checkpoint(
                 token=token,
                 commit_message=f"{stage}: update latest -> {epoch_dir_name}",
             )
-            print(f"☁️  Pushed checkpoint to HF: {repo_id} ({stage}/{epoch_dir_name} and {stage}/latest)")
+            print(f"[HF]  Pushed checkpoint to HF: {repo_id} ({stage}/{epoch_dir_name} and {stage}/latest)")
         except Exception as exc:
-            print(f"⚠️  Failed to push checkpoint to HF: {exc}")
+            print(f"[Warning]  Failed to push checkpoint to HF: {exc}")
     else:
-        print("ℹ️  Skipped HF push (Hub disabled or token/repo missing).")
+        print("[Info]  Skipped HF push (Hub disabled or token/repo missing).")
 
 def train_stage1_raw(
     model,
@@ -295,7 +295,7 @@ def train_stage1_raw(
     hf_repo_id: Optional[str] = None,
 ):
     """Trains the model on motion sequences only to learn the 'language of motion'."""
-    from data import MotionDataset # Import here to avoid circular imports
+    from signmotion_gpt.word_pipeline.data import MotionDataset # Import here to avoid circular imports
     
     print("\n" + "="*80)
     print("      STAGE 1: MOTION LANGUAGE MODELING (PRE-TRAINING)")
@@ -316,9 +316,9 @@ def train_stage1_raw(
         if opt_path is not None:
             try:
                 optimizer.load_state_dict(torch.load(opt_path, map_location=device))
-                print("↩️  Resumed optimizer state for Stage 1 from HF.")
+                print("[Resume]  Resumed optimizer state for Stage 1 from HF.")
             except Exception as exc:
-                print(f"⚠️  Failed to load optimizer state for Stage 1: {exc}")
+                print(f"[Warning]  Failed to load optimizer state for Stage 1: {exc}")
 
     for epoch in range(start_epoch, S1_EPOCHS):
         total_loss = 0
@@ -372,7 +372,7 @@ def train_stage1_raw(
             hf_auth_token=token
         )
     
-    print("\n✅ Stage 1 Training Complete.")
+    print("\n[OK] Stage 1 Training Complete.")
     return model
 
 def train_stage2_raw(
@@ -385,7 +385,7 @@ def train_stage2_raw(
     hf_stage_subdir: str = "stage2",
 ):
     """Fine-tunes the motion-aware model to connect text prompts to motions."""
-    from data import TextMotionDataset # Import here to avoid circular imports
+    from signmotion_gpt.word_pipeline.data import TextMotionDataset # Import here to avoid circular imports
 
     print("\n" + "="*80)
     print("      STAGE 2: TEXT-TO-MOTION FINE-TUNING")
@@ -406,9 +406,9 @@ def train_stage2_raw(
         if opt_path is not None:
             try:
                 optimizer.load_state_dict(torch.load(opt_path, map_location=device))
-                print("↩️  Resumed optimizer state for Stage 2 from HF.")
+                print("[Resume]  Resumed optimizer state for Stage 2 from HF.")
             except Exception as exc:
-                print(f"⚠️  Failed to load optimizer state for Stage 2: {exc}")
+                print(f"[Warning]  Failed to load optimizer state for Stage 2: {exc}")
 
     for epoch in range(start_epoch, S2_EPOCHS):
         total_loss = 0
@@ -463,7 +463,7 @@ def train_stage2_raw(
             hf_auth_token=token
         )
         
-    print("\n✅ Stage 2 Training Complete.")
+    print("\n[OK] Stage 2 Training Complete.")
     return model
 
 
@@ -480,7 +480,7 @@ def train_stage3_instruct_raw(
     Stage 3 (Instruct): word-only prompt (no participant_id), 1-to-many mapping.
     Each step samples a random motion variant for the word as the supervised target.
     """
-    from data import InstructTextMotionDataset  # Import here to avoid circular imports
+    from signmotion_gpt.word_pipeline.data import InstructTextMotionDataset  # Import here to avoid circular imports
 
     print("\n" + "="*80)
     print("      STAGE 3: INSTRUCT TUNING (WORD-ONLY, NO PARTICIPANT ID)")
@@ -501,9 +501,9 @@ def train_stage3_instruct_raw(
         if opt_path is not None:
             try:
                 optimizer.load_state_dict(torch.load(opt_path, map_location=device))
-                print("↩️  Resumed optimizer state for Stage 3 from HF.")
+                print("[Resume]  Resumed optimizer state for Stage 3 from HF.")
             except Exception as exc:
-                print(f"⚠️  Failed to load optimizer state for Stage 3: {exc}")
+                print(f"[Warning]  Failed to load optimizer state for Stage 3: {exc}")
 
     for epoch in range(start_epoch, S3_EPOCHS):
         total_loss = 0.0
@@ -558,7 +558,7 @@ def train_stage3_instruct_raw(
             hf_auth_token=token,
         )
 
-    print("\n✅ Stage 3 Training Complete.")
+    print("\n[OK] Stage 3 Training Complete.")
     return model
 
 # ======================================================================================
@@ -832,7 +832,7 @@ def load_model_from_hub(repo_id: str):
     """
     try:
         from unsloth import FastLanguageModel
-        from config import MAX_SEQ_LEN, DTYPE
+        from signmotion_gpt.common.config import MAX_SEQ_LEN, DTYPE
         
         print(f"\nLoading model from HuggingFace Hub (Unsloth): {repo_id}")
         model, tokenizer = FastLanguageModel.from_pretrained(

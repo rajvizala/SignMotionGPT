@@ -1,26 +1,11 @@
 """
-Visualization script to convert motion tokens to SMPL-X 3D animation.
-Requires VQ-VAE checkpoint, dataset stats, and SMPL-X model files.
+Visualization utilities for converting motion tokens to SMPL-X animations.
+Requires a VQ-VAE checkpoint, dataset stats, and SMPL-X model files.
 
-Usage:
-    # Visualize from LLM output string (interactive HTML)
-    python visualize.py --tokens "<MOT_BEGIN><motion_177><motion_135>...<MOT_END>"
-    
-    # Visualize from saved file
-    python visualize.py --input motion_output.txt
-    
-    # Generate and visualize in one go
-    python visualize.py --prompt "walking" --stage 3
-    
-    # High-quality video rendering (like SOKE paper)
-    python visualize.py --tokens "..." --render-mode video --output motion.mp4
-    
-    # Different render styles
-    python visualize.py --tokens "..." --render-mode video --style silhouette
-    python visualize.py --tokens "..." --render-mode video --style hands-highlight
-    
-    # Custom paths
-    python visualize.py --tokens "..." --vqvae-ckpt /path/to/vqvae.pt --smplx-dir /path/to/smplx
+CLI wrapper examples:
+    python scripts/visualize_motion.py --tokens "<M_START><M177><M135><M_END>"
+    python scripts/visualize_motion.py --input motion_output.txt
+    python scripts/visualize_motion.py --prompt "walking" --stage 3
 """
 # IMPORTANT: Set OpenGL platform BEFORE any OpenGL imports (for headless rendering)
 import os
@@ -35,7 +20,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from config import WORK_DIR, DATA_DIR
+from signmotion_gpt.common.config import WORK_DIR, DATA_DIR
 
 # Try importing visualization dependencies
 try:
@@ -131,7 +116,7 @@ try:
     
     from mGPT.archs.mgpt_vq import VQVae
 except ImportError as e:
-    print(f"❌ Could not import VQVae: {e}")
+    print(f"[Error] Could not import VQVae: {e}")
     print("Make sure mGPT/archs/mgpt_vq.py exists in the project.")
     sys.exit(1)
 
@@ -220,14 +205,14 @@ def load_vqvae(checkpoint_path, device=DEVICE, vq_args=VQ_ARGS):
     model.load_state_dict(state_dict, strict=False)
     model.eval()
     
-    print(f"✅ VQ-VAE loaded (codebook size: {CODEBOOK_SIZE})")
+    print(f"[OK] VQ-VAE loaded (codebook size: {CODEBOOK_SIZE})")
     return model
 
 
 def load_stats(stats_path):
     """Load normalization statistics (mean/std) used during VQ-VAE training"""
     if not stats_path or not os.path.exists(stats_path):
-        print(f"⚠️  Stats file not found: {stats_path}")
+        print(f"[Warning]  Stats file not found: {stats_path}")
         print("   Will skip denormalization (may affect quality)")
         return None, None
     
@@ -242,7 +227,7 @@ def load_stats(stats_path):
     if torch.is_tensor(std):
         std = std.cpu().numpy()
     
-    print(f"✅ Stats loaded (mean shape: {np.array(mean).shape})")
+    print(f"[OK] Stats loaded (mean shape: {np.array(mean).shape})")
     return mean, std
 
 
@@ -271,7 +256,7 @@ def load_smplx_model(model_dir, device=DEVICE):
         create_transl=True
     ).to(device)
     
-    print(f"✅ SMPL-X loaded")
+    print(f"[OK] SMPL-X loaded")
     return model
 
 

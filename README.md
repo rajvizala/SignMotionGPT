@@ -1,116 +1,179 @@
 
-### 1) Configure setup script (one time)
+# SignMotionGPT
 
-Run the setup:
+SignMotionGPT now follows a cleaner research-repo layout with the code organized by pipeline and function instead of keeping most training logic as unrelated top-level files.
+
+The repository contains two main training tracks:
+
+1. Word-level pipeline:
+   - train or reuse a VQ-VAE,
+   - build a JSON dataset that maps each word to motion tokens,
+   - train the Qwen-based LLM stages.
+2. Sentence-level pipeline:
+   - start from a VQ-VAE checkpoint,
+   - optionally finetune that VQ-VAE for sentence data,
+   - build a JSON dataset with sentence samples and motion tokens,
+   - train the sentence-level Qwen pipeline.
+
+## Repository layout
+
+```text
+.
+|-- README.md
+|-- docs/
+|   |-- cleanup_candidates.md
+|   |-- inference_and_visualization.md
+|   `-- repository_layout.md
+|-- legacy/
+|   |-- README.md
+|   |-- collators.py
+|   |-- templates.py
+|   |-- test_overfit.py
+|   `-- install_artifacts/
+|-- mGPT/
+|-- scripts/
+|   |-- evaluate_test_dataset.py
+|   |-- finetune_sentence_vqvae.py
+|   |-- infer_motion.py
+|   |-- train_mgpt_vqvae.py
+|   |-- train_sentence_pipeline.py
+|   |-- train_word_pipeline.py
+|   |-- train_word_vqvae.py
+|   `-- visualize_motion.py
+|-- signmotion_gpt/
+|   |-- common/
+|   |-- evaluation/
+|   |-- sentence_pipeline/
+|   |-- visualization/
+|   |-- vqvae/
+|   `-- word_pipeline/
+|-- requirements.txt
+`-- setup_env.sh
+```
+
+## Main code locations
+
+- `signmotion_gpt/common/`: shared configuration.
+- `signmotion_gpt/word_pipeline/`: word-level dataset prep, model setup, training, and inference.
+- `signmotion_gpt/sentence_pipeline/`: sentence-level training pipeline.
+- `signmotion_gpt/evaluation/`: metrics, constrained generation helpers, and held-out test evaluation.
+- `signmotion_gpt/visualization/`: token-to-motion visualization.
+- `signmotion_gpt/vqvae/`: VQ-VAE training and sentence-level VQ-VAE finetuning code.
+- `legacy/`: archival or diagnostic code kept out of the main training path.
+
+Detailed folder notes are in `docs/repository_layout.md`.
+
+## Setup
 
 ```bash
 bash setup_env.sh
 ```
 
-After setup, defaults are:
-- `WORK_DIR` = current directory
-- `DATA_JSON_PATH` = `./data/motion_llm_dataset.json`
-
-You can override via environment variables if needed:
+Important environment variables:
 
 ```bash
-export WORK_DIR=/path/to/workdir
+export WORK_DIR=/path/to/repo
 export DATA_JSON_PATH=/path/to/motion_llm_dataset.json
+export HUGGINGFACE_HUB_TOKEN=your_token
 ```
 
-## Overview
+## Word-level pipeline
 
-This repository implements a robust 2-stage training pipeline for motion generation, replicating the high-performance "overfit" test setup:
-- **Stage 1**: Motion-only Language Model (MLM) - Pre-training on motion token sequences to learn the "language of motion".
-- **Stage 2**: Text-to-Motion Fine-Tuning (T2M) - Supervised fine-tuning to align text prompts with motion sequences.
+Use this path when your dataset maps individual words to motion-token sequences.
 
-Key features:
-- **Integrated Evaluation**: Automatically computes FID, Diversity, and Multimodality (MIM) metrics.
-- **Side-by-Side Visualization**: Generates HTML comparisons of Ground Truth vs Generated motions.
-- **Test Set Evaluation**: Can optionally run evaluation on a held-out test set (SMPL-X data).
-- **Hugging Face Integration**: Automatic checkpointing and resuming from the Hub.
+### Expected dataset fields
 
-## Installation
-
-```bash
-# Clone the repository
-git clone https://github.com/rajvizala/SignMotionGPT.git
-cd SignMotionGPT
-
-# Setup Everything
-bash setup_env.sh
-```
-
-## Dataset Format
-
-Your dataset should be a JSON file with the following structure:
+Typical fields used by the word pipeline:
 
 ```json
 [
   {
-    "text_query": "a person walks forward",
-    "motion_tokens": "42 18 91 ...",
-    "participant_id": "P001"  // Optional
-  },
-  ...
+    "word": "library",
+    "motion_tokens": "42 18 91 17",
+    "participant_id": "P001"
+  }
 ]
 ```
 
-## Quick Start
-
-### 1. Configure Training
-
-Edit `config.py` to set your paths and hyperparameters. Key settings include:
-- `DATA_JSON_PATH`: Path to your dataset.
-- `MODEL_NAME`: Base model (e.g., "Qwen/Qwen3-0.6B").
-- `PIPELINE_OUTPUT_DIR`: Directory for checkpoints and results.
-- `HF_TOKEN`: Your Hugging Face token (or set via env var).
-
-### 2. Run Full Pipeline
+### Train
 
 ```bash
-python train_pipeline.py
+python scripts/train_word_pipeline.py
 ```
 
-This script orchestrates the entire process:
-1.  **Data Loading & Cleaning**: Deduplicates samples and builds vocabulary.
-2.  **Stage 1 Training**: Motion Language Modeling (Pre-training).
-3.  **Stage 2 Training**: Text-to-Motion Fine-Tuning.
-4.  **Evaluation**: Runs inference on specific words, computes metrics (FID, Diversity, MIM), and generates visualizations.
-5.  **Test Set Evaluation**: (Optional) Runs evaluation on held-out test data if configured.
+This pipeline handles:
 
-### 3. Environment Variables
+1. dataset loading and deduplication,
+2. motion vocabulary construction,
+3. Stage 1 motion-language pretraining,
+4. Stage 2 text-to-motion finetuning,
+5. optional Stage 3 instruct finetuning,
+6. evaluation and optional held-out test evaluation.
 
-You can control many aspects via environment variables without editing code:
+### Inference
 
 ```bash
-# Training Config
-export PIPELINE_S1_EPOCHS=20
-export PIPELINE_S2_EPOCHS=20
-export PIPELINE_S1_BATCH=8
-export PIPELINE_S2_BATCH=8
-
-# Hugging Face
-export HUGGINGFACE_HUB_TOKEN="your_token"
-export HF_UPLOAD_INTERVAL_EPOCHS=2
-
-# Evaluation
-export EVALUATION_WORDS="passport,send,library"
-export TEST_EVAL_SAMPLE_LIMIT=100
+python scripts/infer_motion.py --prompt "library" --stage 3
 ```
 
-## Held-out Test Dataset Evaluation
-
-The pipeline includes integration with `test_dataset_eval.py` to measure performance on an unseen SMPL-X test dataset.
-
-To enable this, ensure `TEST_EVAL_DOWNLOAD_DIR` or `TEST_EVAL_EXTRACT_DIR` are configured in `config.py` or via env vars. The pipeline will attempt to run this after training if data is available.
-
-## Visualization
-
-The pipeline automatically generates side-by-side HTML visualizations in the output directory (`html_visualizations` folder). You can open these in any browser to compare Ground Truth motions with the model's generations.
-
-To manually visualize tokens:
+### Visualization
 
 ```bash
-python visualize.py --tokens "<MOT_BEGIN><motion_177>...<MOT_END>" --output my_anim.html
+python scripts/visualize_motion.py --input generated_motion.txt
 ```
+
+## Sentence-level pipeline
+
+Use this path when your dataset contains sentence samples and motion-token sequences.
+
+### Expected dataset fields
+
+Sentence training expects items marked with `type: "sentence"` and a sentence text field such as `text` or `sentence`.
+
+```json
+[
+  {
+    "type": "sentence",
+    "text": "the person walks to the door",
+    "motion_tokens": "42 18 91 17"
+  }
+]
+```
+
+### Step 1: finetune the VQ-VAE for sentence data
+
+```bash
+python scripts/finetune_sentence_vqvae.py \
+  --vqvae-ckpt /path/to/base_vqvae.pt \
+  --word-data-dir /path/to/word_level_motion_data \
+  --sentence-data-dir /path/to/sentence_level_motion_data \
+  --output-dir /path/to/output_dir
+```
+
+### Step 2: train the sentence-level LLM
+
+```bash
+python scripts/train_sentence_pipeline.py \
+  --dataset-path /path/to/sentence_dataset.json \
+  --vqvae-ckpt /path/to/finetuned_vqvae.pt
+```
+
+## Evaluation and held-out testing
+
+Held-out evaluation is available as a standalone entrypoint:
+
+```bash
+python scripts/evaluate_test_dataset.py --help
+```
+
+Additional inference and visualization examples live in `docs/inference_and_visualization.md`.
+
+## Archived material and cleanup candidates
+
+- Archival files moved out of the main path are documented in `legacy/README.md`.
+- Likely non-core or removable files are listed in `docs/cleanup_candidates.md`.
+
+## Notes
+
+- `mGPT/` is preserved as the vendored VQ-VAE architecture dependency used by the VQ-VAE and visualization code.
+- The main entrypoints are now under `scripts/`, while the reusable code lives under `signmotion_gpt/`.

@@ -11,8 +11,9 @@ import torch
 from typing import List, Tuple, Dict, Optional, Any
 from rapidfuzz.distance import Levenshtein
 from collections import defaultdict
-from data import motion_specials_to_ids
-from config import (
+from signmotion_gpt.word_pipeline.data import motion_specials_to_ids
+from signmotion_gpt.evaluation.generation import generate_t2m
+from signmotion_gpt.common.config import (
     SEED, PIPELINE_OUTPUT_DIR, M_START, M_END,
     INFERENCE_TEMPERATURE, INFERENCE_TOP_K, INFERENCE_REPETITION_PENALTY
 )
@@ -20,7 +21,7 @@ from config import (
 random.seed(SEED)
 
 # ======================================================================================
-# Length-conditioning bin thresholds — MUST match train_sentence_pipeline_v2.py exactly
+# Length-conditioning bin thresholds - MUST match signmotion_gpt.sentence_pipeline.pipeline exactly
 # ======================================================================================
 LEN_CURRICULUM_SHORT_MAX  = 30   # < 30 tokens  -> LEN_SHORT
 LEN_CURRICULUM_MEDIUM_MAX = 80   # 30-79 tokens -> LEN_MEDIUM
@@ -1161,7 +1162,7 @@ def evaluate_metrics_motiongpt_style(model, tokenizer, eval_data, all_motion_tok
         mim_gt = calculate_multimodality_np(gt_lbl_tensor, multimodality_times=multimodality_times)
         mim_gen = calculate_multimodality_np(gen_lbl_tensor, multimodality_times=multimodality_times)
     except Exception as exc:
-        print(f"⚠️  Multimodality could not be computed reliably: {exc}")
+        print(f"[Warning]  Multimodality could not be computed reliably: {exc}")
         mim_gt = float("nan")
         mim_gen = float("nan")
     # FID
@@ -1258,7 +1259,7 @@ def evaluate_metrics_encoder_style(
         mean, std = load_stats(stats_p)
         from visualize import decode_tokens_to_params
     except Exception as exc:
-        print(f"⚠️  Could not set up VQ-VAE encoder metrics: {exc}")
+        print(f"[Warning]  Could not set up VQ-VAE encoder metrics: {exc}")
         return {}
     # Collect GT/GEN token sequences for pairs (limit to speed-up)
     pairs = _collect_eval_pairs(model, tokenizer, eval_data[:sample_limit], device, include_participant=include_participant)
@@ -1302,7 +1303,7 @@ def evaluate_metrics_encoder_style(
         mim_gt = calculate_multimodality_np(gt_lbl_tensor, multimodality_times=multimodality_times)
         mim_gen = calculate_multimodality_np(gen_lbl_tensor, multimodality_times=multimodality_times)
     except Exception as exc:
-        print(f"⚠️  Multimodality could not be computed reliably: {exc}")
+        print(f"[Warning]  Multimodality could not be computed reliably: {exc}")
         mim_gt = float("nan")
         mim_gen = float("nan")
     # FID (on encoder features)
@@ -1534,7 +1535,7 @@ def run_inference_on_all_samples(model, tokenizer, data, device, include_partici
         gt_tokens = gt.split()
         gen_tokens = gen.split()
 
-        print("\nDetailed Comparison (✅ = Match, ❌ = Mismatch/Missing/Added):")
+        print("\nDetailed Comparison ([OK] = Match, [Error] = Mismatch/Missing/Added):")
         
         gt_str =   "  GT:  "
         gen_str =  "  GEN: "
@@ -1554,9 +1555,9 @@ def run_inference_on_all_samples(model, tokenizer, data, device, include_partici
             gen_str += gen_tok_padded + " "
             
             if gt_tok == gen_tok:
-                diff_str += "✅".ljust(max_tok_len) + " "
+                diff_str += "[OK]".ljust(max_tok_len) + " "
             else:
-                diff_str += "❌".ljust(max_tok_len) + " "
+                diff_str += "[Error]".ljust(max_tok_len) + " "
                 
         print(gt_str)
         print(gen_str)

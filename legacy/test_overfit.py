@@ -230,14 +230,14 @@ def _resolve_and_ensure_repo(repo_id: str) -> Optional[str]:
     if not HF_USE_HUB:
         return None
     if hf_auth_token is None:
-        print("⚠️  HF token not found. Set HUGGINGFACE_HUB_TOKEN or hf_auth_token to enable Hub sync.")
+        print("[Warning]  HF token not found. Set HUGGINGFACE_HUB_TOKEN or hf_auth_token to enable Hub sync.")
         return None
     api = HfApi()
     try:
         who = api.whoami(token=hf_auth_token)
         namespace = who.get("name") or (who.get("orgs", [None])[0] if isinstance(who.get("orgs"), list) else None)
     except Exception as exc:
-        print(f"⚠️  Unable to resolve HF namespace: {exc}")
+        print(f"[Warning]  Unable to resolve HF namespace: {exc}")
         namespace = None
     if "/" not in repo_id and namespace:
         full_repo_id = f"{namespace}/{repo_id}"
@@ -252,7 +252,7 @@ def _resolve_and_ensure_repo(repo_id: str) -> Optional[str]:
             exist_ok=True,
         )
     except Exception as exc:
-        print(f"⚠️  create_repo failed (may already exist): {exc}")
+        print(f"[Warning]  create_repo failed (may already exist): {exc}")
     return full_repo_id
 
 def _repo_has_stage_latest(repo_id: str, stage: str) -> bool:
@@ -264,7 +264,7 @@ def _repo_has_stage_latest(repo_id: str, stage: str) -> bool:
         files = api.list_repo_files(repo_id=repo_id, repo_type="model", token=hf_auth_token)
         return any(path.startswith(f"{stage}/latest/") and path.endswith("config.json") for path in files)
     except Exception as exc:
-        print(f"⚠️  Could not list files for {repo_id}: {exc}")
+        print(f"[Warning]  Could not list files for {repo_id}: {exc}")
         return False
 
 def _repo_list_epoch_numbers(repo_id: str, stage: str) -> List[int]:
@@ -278,7 +278,7 @@ def _repo_list_epoch_numbers(repo_id: str, stage: str) -> List[int]:
     try:
         files = api.list_repo_files(repo_id=repo_id, repo_type="model", token=hf_auth_token)
     except Exception as exc:
-        print(f"⚠️  Could not list files for {repo_id}: {exc}")
+        print(f"[Warning]  Could not list files for {repo_id}: {exc}")
         return []
     epoch_numbers: List[int] = []
     pattern = re.compile(rf"^{re.escape(stage)}/epoch-(\d+)/config\.json$")
@@ -312,7 +312,7 @@ def _load_model_and_tokenizer_from_hf_subfolder(repo_id: str, subfolder: str) ->
         tokenizer = AutoTokenizer.from_pretrained(repo_id, subfolder=subfolder, trust_remote_code=True)
         model = AutoModelForCausalLM.from_pretrained(repo_id, subfolder=subfolder, trust_remote_code=True)
     except Exception as exc:
-        print(f"⚠️  Failed to load model/tokenizer from subfolder '{subfolder}': {exc}")
+        print(f"[Warning]  Failed to load model/tokenizer from subfolder '{subfolder}': {exc}")
         return None
     if tokenizer.pad_token is None:
         tokenizer.add_special_tokens({"pad_token": PAD_TOKEN})
@@ -462,11 +462,11 @@ def _save_and_push_checkpoint(
                 token=hf_auth_token,
                 commit_message=f"{stage}: update latest -> {epoch_dir_name}",
             )
-            print(f"☁️  Pushed checkpoint to HF: {repo_id} ({stage}/{epoch_dir_name} and {stage}/latest)")
+            print(f"[HF]  Pushed checkpoint to HF: {repo_id} ({stage}/{epoch_dir_name} and {stage}/latest)")
         except Exception as exc:
-            print(f"⚠️  Failed to push checkpoint to HF: {exc}")
+            print(f"[Warning]  Failed to push checkpoint to HF: {exc}")
     else:
-        print("ℹ️  Skipped HF push (Hub disabled or token/repo missing).")
+        print("[Info]  Skipped HF push (Hub disabled or token/repo missing).")
 
 # ======================================================================================
 # 3. Training Stage 1: Motion Language Modeling
@@ -524,9 +524,9 @@ def train_stage1(
         if opt_path is not None:
             try:
                 optimizer.load_state_dict(torch.load(opt_path, map_location=device))
-                print("↩️  Resumed optimizer state for Stage 1 from HF.")
+                print("[Resume]  Resumed optimizer state for Stage 1 from HF.")
             except Exception as exc:
-                print(f"⚠️  Failed to load optimizer state for Stage 1: {exc}")
+                print(f"[Warning]  Failed to load optimizer state for Stage 1: {exc}")
 
     for epoch in range(start_epoch, S1_EPOCHS):
         total_loss = 0
@@ -579,7 +579,7 @@ def train_stage1(
             repo_id=repo_for_epoch,
         )
     
-    print("\n✅ Stage 1 Training Complete.")
+    print("\n[OK] Stage 1 Training Complete.")
     return model
 
 # ======================================================================================
@@ -656,9 +656,9 @@ def train_stage2(
         if opt_path is not None:
             try:
                 optimizer.load_state_dict(torch.load(opt_path, map_location=device))
-                print("↩️  Resumed optimizer state for Stage 2 from HF.")
+                print("[Resume]  Resumed optimizer state for Stage 2 from HF.")
             except Exception as exc:
-                print(f"⚠️  Failed to load optimizer state for Stage 2: {exc}")
+                print(f"[Warning]  Failed to load optimizer state for Stage 2: {exc}")
 
     for epoch in range(start_epoch, S2_EPOCHS):
         total_loss = 0
@@ -712,7 +712,7 @@ def train_stage2(
             repo_id=repo_for_epoch,
         )
         
-    print("\n✅ Stage 2 Training Complete.")
+    print("\n[OK] Stage 2 Training Complete.")
     if not os.path.exists(OUTPUT_DIR):
         os.makedirs(OUTPUT_DIR)
     model.save_pretrained(OUTPUT_DIR)
@@ -750,7 +750,7 @@ def compare_sequences(gt: str, gen: str):
     gt_tokens = gt.split()
     gen_tokens = gen.split()
 
-    print("\nDetailed Comparison (✅ = Match, ❌ = Mismatch/Missing/Added):")
+    print("\nDetailed Comparison ([OK] = Match, [Mismatch] = Mismatch/Missing/Added):")
     
     gt_str =   "  GT:  "
     gen_str =  "  GEN: "
@@ -770,9 +770,9 @@ def compare_sequences(gt: str, gen: str):
         gen_str += gen_tok_padded + " "
         
         if gt_tok == gen_tok:
-            diff_str += "✅".ljust(max_tok_len) + " "
+            diff_str += "[OK]".ljust(max_tok_len) + " "
         else:
-            diff_str += "❌".ljust(max_tok_len) + " "
+            diff_str += "[Mismatch]".ljust(max_tok_len) + " "
             
     print(gt_str)
     print(gen_str)
@@ -985,7 +985,7 @@ def evaluate_metrics_motiongpt_style(model, tokenizer, eval_data, all_motion_tok
         mim_gt = calculate_multimodality_np(gt_lbl_tensor, multimodality_times=multimodality_times)
         mim_gen = calculate_multimodality_np(gen_lbl_tensor, multimodality_times=multimodality_times)
     except Exception as exc:
-        print(f"⚠️  Multimodality could not be computed reliably: {exc}")
+        print(f"[Warning]  Multimodality could not be computed reliably: {exc}")
         mim_gt = float("nan")
         mim_gen = float("nan")
     # FID
@@ -1098,7 +1098,7 @@ def evaluate_metrics_codebook_style(model, tokenizer, eval_data, device, vqvae_c
         vq_ckpt = vqvae_ckpt or os.getenv("VQVAE_CHECKPOINT", DEFAULT_VQ)
         vq_model = load_vqvae(vq_ckpt, device=device)
     except Exception as exc:
-        print(f"⚠️  Could not load VQ-VAE for codebook metrics: {exc}")
+        print(f"[Warning]  Could not load VQ-VAE for codebook metrics: {exc}")
         return {}
     # Collect pairs and build features
     pairs = _collect_eval_pairs(model, tokenizer, eval_data, device)
@@ -1115,7 +1115,7 @@ def evaluate_metrics_codebook_style(model, tokenizer, eval_data, device, vqvae_c
         mim_gt = calculate_multimodality_np(gt_lbl_tensor, multimodality_times=multimodality_times)
         mim_gen = calculate_multimodality_np(gen_lbl_tensor, multimodality_times=multimodality_times)
     except Exception as exc:
-        print(f"⚠️  Multimodality could not be computed reliably: {exc}")
+        print(f"[Warning]  Multimodality could not be computed reliably: {exc}")
         mim_gt = float("nan")
         mim_gen = float("nan")
     # FID (on codebook features)
@@ -1225,7 +1225,7 @@ def evaluate_metrics_encoder_style(
         mean, std = load_stats(stats_p)
         from visualize import decode_tokens_to_params
     except Exception as exc:
-        print(f"⚠️  Could not set up VQ-VAE encoder metrics: {exc}")
+        print(f"[Warning]  Could not set up VQ-VAE encoder metrics: {exc}")
         return {}
     # Collect GT/GEN token sequences for pairs (limit to speed-up)
     pairs = _collect_eval_pairs(model, tokenizer, eval_data[:sample_limit], device)
@@ -1269,7 +1269,7 @@ def evaluate_metrics_encoder_style(
         mim_gt = calculate_multimodality_np(gt_lbl_tensor, multimodality_times=multimodality_times)
         mim_gen = calculate_multimodality_np(gen_lbl_tensor, multimodality_times=multimodality_times)
     except Exception as exc:
-        print(f"⚠️  Multimodality could not be computed reliably: {exc}")
+        print(f"[Warning]  Multimodality could not be computed reliably: {exc}")
         mim_gt = float("nan")
         mim_gen = float("nan")
     # FID (on encoder features)
@@ -1310,7 +1310,7 @@ def save_side_by_side_visualizations(pairs: list[Tuple[str, str, str]], output_d
         import plotly.graph_objects as go
         from plotly.subplots import make_subplots
     except Exception as exc:
-        print(f"⚠️  Visualization skipped (missing dependencies): {exc}")
+        print(f"[Warning]  Visualization skipped (missing dependencies): {exc}")
         return
 
     os.makedirs(output_dir, exist_ok=True)
@@ -1364,7 +1364,7 @@ def save_side_by_side_visualizations(pairs: list[Tuple[str, str, str]], output_d
         )
         if output_html:
             fig.write_html(output_html)
-            print(f"✅ Saved: {output_html}")
+            print(f"[OK] Saved: {output_html}")
         return fig
 
     # Determine which words to include (up to `limit` distinct words)
@@ -1409,7 +1409,7 @@ def save_side_by_side_visualizations(pairs: list[Tuple[str, str, str]], output_d
                 output_html=output_html
             )
         except Exception as exc:
-            print(f"⚠️  Error creating visualization for word '{pair[0]}': {exc}")
+            print(f"[Warning]  Error creating visualization for word '{pair[0]}': {exc}")
 
 # ======================================================================================
 # 6. Main Execution Block (UPDATED)
@@ -1544,7 +1544,7 @@ def main(config_overrides: Optional[Dict[str, Any]] = None):
         }
         with open(METRICS_JSON_PATH, "w", encoding="utf-8") as f:
             json.dump(metrics_payload, f, ensure_ascii=False, indent=2)
-        print(f"\n✅ Saved metrics to {METRICS_JSON_PATH}")
+        print(f"\n[OK] Saved metrics to {METRICS_JSON_PATH}")
         return
 
     # Full flow: inference logs + MotionGPT-style metrics + encoder metrics + visualizations

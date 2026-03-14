@@ -1,7 +1,5 @@
 """
-train_sentence_pipeline_v2.py
-
-Sentence-Level SignMotionGPT Training Pipeline V2
+Sentence-level SignMotionGPT training pipeline.
 
 CHANGES FROM V1:
 1. DEDUPLICATION WITH TEMPLATE AUGMENTATION - Keep unique sentences, multiply with 4 instruction templates
@@ -50,7 +48,7 @@ from huggingface_hub import HfApi, hf_hub_download, upload_folder
 
 # Import evaluation functions from metrics module
 try:
-    from metrics import (
+    from signmotion_gpt.evaluation.metrics import (
         evaluate_metrics_encoder_style,
         run_inference_on_all_samples,
         evaluate_metrics_motiongpt_style,

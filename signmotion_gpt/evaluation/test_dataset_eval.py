@@ -22,7 +22,7 @@ import numpy as np
 import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
-from config import (
+from signmotion_gpt.common.config import (
     TEST_EVAL_DOWNLOAD_DIR,
     TEST_EVAL_EXTRACT_DIR,
     TEST_EVAL_HF_REPO,
@@ -91,7 +91,7 @@ def extract_zip_files(zip_paths: List[str], extract_dir: str, limit: Optional[in
                 archive.extractall(target)
                 extracted_roots.append(target)
         except Exception as exc:
-            print(f"⚠️  Failed to extract {zp}: {exc}")
+            print(f"[Warning]  Failed to extract {zp}: {exc}")
     print(f"Extracted {len(extracted_roots)} archives.")
     return extracted_roots
 
@@ -131,7 +131,7 @@ def load_smplx_params_from_pkl(pkl_path: str) -> Optional[np.ndarray]:
         with open(pkl_path, "rb") as handle:
             payload = pickle.load(handle)
     except Exception as exc:
-        print(f"⚠️  Could not read {pkl_path}: {exc}")
+        print(f"[Warning]  Could not read {pkl_path}: {exc}")
         return None
 
     if not isinstance(payload, (list, tuple)) or len(payload) == 0:
@@ -500,7 +500,7 @@ def run_evaluation(args: argparse.Namespace) -> Dict[str, object]:
             print(f"Processed {idx} samples...")
 
     if len(gt_features) < 5 or len(gen_features) < 5:
-        print("⚠️  Not enough samples to compute stable metrics; results may be noisy.")
+        print("[Warning]  Not enough samples to compute stable metrics; results may be noisy.")
 
     gt_feats = np.stack(gt_features, axis=0) if gt_features else np.zeros((0, 1), dtype=np.float32)
     gen_feats = np.stack(gen_features, axis=0) if gen_features else np.zeros((0, 1), dtype=np.float32)
@@ -518,7 +518,7 @@ def run_evaluation(args: argparse.Namespace) -> Dict[str, object]:
             gen_lbl_tensor, multimodality_times=min(20, max(3, gen_lbl_tensor.shape[1] - 1))
         )
     except Exception as exc:
-        print(f"⚠️  Multimodality could not be computed reliably: {exc}")
+        print(f"[Warning]  Multimodality could not be computed reliably: {exc}")
         mim_gt = float("nan")
         mim_gen = float("nan")
 
@@ -544,7 +544,7 @@ def run_evaluation(args: argparse.Namespace) -> Dict[str, object]:
     }
     with open(metrics_path, "w", encoding="utf-8") as handle:
         json.dump(metrics_payload, handle, ensure_ascii=False, indent=2)
-    print(f"\n✅ Saved test metrics to {metrics_path}")
+    print(f"\n[OK] Saved test metrics to {metrics_path}")
     return metrics_payload
 
 

@@ -25,7 +25,7 @@ PIPELINE_OUTPUT_DIR = os.environ.get("PIPELINE_OUTPUT_DIR", "./motion_gpt_full_m
 METRICS_JSON_PATH = os.path.join(PIPELINE_OUTPUT_DIR, "metrics.json")
 CHECKPOINTS_DIR = os.path.join(PIPELINE_OUTPUT_DIR, "checkpoints")
 
-# Output directories for stages (Required for inference.py)
+# Output directories for staged checkpoints used by word-level inference
 OUT_S1 = os.path.join(CHECKPOINTS_DIR, "stage1")
 OUT_S2 = os.path.join(CHECKPOINTS_DIR, "stage2")
 OUT_S3 = os.path.join(CHECKPOINTS_DIR, "stage3")

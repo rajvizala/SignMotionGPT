@@ -118,7 +118,7 @@ class EnhancedMotionDataset(Dataset):
         self.unprocessed = [f for f in all_folders if f not in self.processed]
 
         if not self.unprocessed:
-            print("✅ All data processed")
+            print("[OK] All data processed")
             return False
         self._prep_batch()
         return True
@@ -263,7 +263,7 @@ def train_mgpt_vqvae(vq_model, dataset, epochs_per_batch=20, batch_size=16, lr=1
 
         if len(dataset) == 0:
             if not dataset.get_next_batch():
-                print("✅ All data processed! Training complete.")
+                print("[OK] All data processed! Training complete.")
                 break
             continue
 
@@ -365,7 +365,7 @@ def train_mgpt_vqvae(vq_model, dataset, epochs_per_batch=20, batch_size=16, lr=1
         dataset.mark_batch_as_processed()
 
         if not dataset.get_next_batch():
-            print("✅ All data processed! Training complete.")
+            print("[OK] All data processed! Training complete.")
             break
 
     return vq_model
