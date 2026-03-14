@@ -1754,7 +1754,7 @@ def main():
     if args.prompt:
         # Generate tokens first using inference.py
         print("Generating motion tokens from prompt...")
-        from inference import inference
+        from inference.inference import inference
         tokens = inference(
             prompt=args.prompt,
             stage=args.stage,
