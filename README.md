@@ -1,116 +1,162 @@
+# SignMotionGPT
 
-### 1) Configure setup script (one time)
+SignMotionGPT has two training tracks:
+- Word-level pipeline: train VQ token language alignment from words.
+- Sentence-level pipeline: train and evaluate sentence-conditioned motion generation.
 
-Run the setup:
+This repository has been reorganized to follow a modular research-repo structure while preserving backward-compatible root entrypoints.
+
+## Repository structure
+
+```text
+.
+├── config.py                         # shared config used across pipelines
+├── data.py                           # shared data loading and dataset utilities
+├── model.py                          # shared model/tokenizer setup
+├── train.py                          # shared stage training loops + HF checkpoint utilities
+├── metrics.py                        # shared evaluation metrics and generation helpers
+├── mGPT/                             # VQ-VAE architecture modules
+│
+├── pipelines/
+│   ├── word/
+│   │   └── train_pipeline.py         # word-level stage1/stage2/stage3 orchestration
+│   └── sentence/
+│       ├── train_sentence_pipeline_v2.py
+│       └── finetune_vqvae_sentence_level.py
+│
+├── evaluation/
+│   └── test_dataset_eval.py          # held-out SMPL-X test set evaluation
+│
+├── inference/
+│   ├── inference.py                  # text -> motion token generation
+│   ├── visualize.py                  # motion token -> SMPL-X visualization
+│   └── generate.py                   # constrained decoding helpers
+│
+├── experiments/
+│   └── legacy/                       # old/ad-hoc scripts retained for reference
+│
+├── docs/
+│   └── inference_and_visualization.md
+│
+├── train_pipeline.py                 # compatibility wrapper
+├── train_sentence_pipeline_v2.py     # compatibility wrapper
+├── finetune_vqvae_sentence_level.py  # compatibility wrapper
+├── test_dataset_eval.py              # compatibility wrapper
+├── inference.py                      # compatibility wrapper
+├── visualize.py                      # compatibility wrapper
+└── setup_env.sh
+```
+
+## Setup
 
 ```bash
 bash setup_env.sh
 ```
 
-After setup, defaults are:
-- `WORK_DIR` = current directory
-- `DATA_JSON_PATH` = `./data/motion_llm_dataset.json`
+Default paths:
+- `WORK_DIR`: current directory
+- `DATA_JSON_PATH`: `./data/motion_llm_dataset.json`
 
-You can override via environment variables if needed:
+Override if needed:
 
 ```bash
 export WORK_DIR=/path/to/workdir
 export DATA_JSON_PATH=/path/to/motion_llm_dataset.json
 ```
 
-## Overview
+## Training workflows
 
-This repository implements a robust 2-stage training pipeline for motion generation, replicating the high-performance "overfit" test setup:
-- **Stage 1**: Motion-only Language Model (MLM) - Pre-training on motion token sequences to learn the "language of motion".
-- **Stage 2**: Text-to-Motion Fine-Tuning (T2M) - Supervised fine-tuning to align text prompts with motion sequences.
+### A) Word-level pipeline
 
-Key features:
-- **Integrated Evaluation**: Automatically computes FID, Diversity, and Multimodality (MIM) metrics.
-- **Side-by-Side Visualization**: Generates HTML comparisons of Ground Truth vs Generated motions.
-- **Test Set Evaluation**: Can optionally run evaluation on a held-out test set (SMPL-X data).
-- **Hugging Face Integration**: Automatic checkpointing and resuming from the Hub.
-
-## Installation
-
-```bash
-# Clone the repository
-git clone https://github.com/rajvizala/SignMotionGPT.git
-cd SignMotionGPT
-
-# Setup Everything
-bash setup_env.sh
-```
-
-## Dataset Format
-
-Your dataset should be a JSON file with the following structure:
-
-```json
-[
-  {
-    "text_query": "a person walks forward",
-    "motion_tokens": "42 18 91 ...",
-    "participant_id": "P001"  // Optional
-  },
-  ...
-]
-```
-
-## Quick Start
-
-### 1. Configure Training
-
-Edit `config.py` to set your paths and hyperparameters. Key settings include:
-- `DATA_JSON_PATH`: Path to your dataset.
-- `MODEL_NAME`: Base model (e.g., "Qwen/Qwen3-0.6B").
-- `PIPELINE_OUTPUT_DIR`: Directory for checkpoints and results.
-- `HF_TOKEN`: Your Hugging Face token (or set via env var).
-
-### 2. Run Full Pipeline
+Main command (backward-compatible):
 
 ```bash
 python train_pipeline.py
 ```
 
-This script orchestrates the entire process:
-1.  **Data Loading & Cleaning**: Deduplicates samples and builds vocabulary.
-2.  **Stage 1 Training**: Motion Language Modeling (Pre-training).
-3.  **Stage 2 Training**: Text-to-Motion Fine-Tuning.
-4.  **Evaluation**: Runs inference on specific words, computes metrics (FID, Diversity, MIM), and generates visualizations.
-5.  **Test Set Evaluation**: (Optional) Runs evaluation on held-out test data if configured.
-
-### 3. Environment Variables
-
-You can control many aspects via environment variables without editing code:
+Equivalent module command:
 
 ```bash
-# Training Config
-export PIPELINE_S1_EPOCHS=20
-export PIPELINE_S2_EPOCHS=20
-export PIPELINE_S1_BATCH=8
-export PIPELINE_S2_BATCH=8
-
-# Hugging Face
-export HUGGINGFACE_HUB_TOKEN="your_token"
-export HF_UPLOAD_INTERVAL_EPOCHS=2
-
-# Evaluation
-export EVALUATION_WORDS="passport,send,library"
-export TEST_EVAL_SAMPLE_LIMIT=100
+python -m pipelines.word.train_pipeline
 ```
 
-## Held-out Test Dataset Evaluation
+Supported stages:
+- `--stage 1`
+- `--stage 2`
+- `--stage 3`
+- `--stage all` (default)
 
-The pipeline includes integration with `test_dataset_eval.py` to measure performance on an unseen SMPL-X test dataset.
-
-To enable this, ensure `TEST_EVAL_DOWNLOAD_DIR` or `TEST_EVAL_EXTRACT_DIR` are configured in `config.py` or via env vars. The pipeline will attempt to run this after training if data is available.
-
-## Visualization
-
-The pipeline automatically generates side-by-side HTML visualizations in the output directory (`html_visualizations` folder). You can open these in any browser to compare Ground Truth motions with the model's generations.
-
-To manually visualize tokens:
+### B) Sentence-level pipeline
 
 ```bash
-python visualize.py --tokens "<MOT_BEGIN><motion_177>...<MOT_END>" --output my_anim.html
+python train_sentence_pipeline_v2.py \
+  --dataset-path /path/to/sentence_dataset.json \
+  --vqvae-ckpt /path/to/vqvae_checkpoint.pt \
+  --stage all
 ```
+
+Equivalent module command:
+
+```bash
+python -m pipelines.sentence.train_sentence_pipeline_v2 \
+  --dataset-path /path/to/sentence_dataset.json \
+  --vqvae-ckpt /path/to/vqvae_checkpoint.pt
+```
+
+### C) Sentence-level VQ-VAE finetuning
+
+```bash
+python finetune_vqvae_sentence_level.py \
+  --vqvae-ckpt /path/to/word_level_vqvae.pt \
+  --word-data-dir /path/to/word_npz \
+  --sentence-data-dir /path/to/how2sign \
+  --stats-path /path/to/stats.pt \
+  --output-dir /path/to/output
+```
+
+## Evaluation and inference
+
+Held-out test set evaluation:
+
+```bash
+python test_dataset_eval.py --local-extracted-dir /path/to/extracted_test_data
+```
+
+Inference from trained model:
+
+```bash
+python inference.py --prompt "walking forward" --stage 3
+```
+
+Visualization:
+
+```bash
+python visualize.py --tokens "<M177> <M135> <M210>"
+```
+
+More examples are in `docs/inference_and_visualization.md`.
+
+## Configuration
+
+Most shared training/eval settings are in `config.py`, including:
+- data and output paths
+- model name
+- stage hyperparameters
+- Hugging Face checkpointing options
+- test-evaluation defaults
+
+## Legacy scripts and cleanup suggestions
+
+The following files are now isolated under `experiments/legacy/` because they are not in the default word/sentence training path:
+- `experiments/legacy/test_overfit.py`
+- `experiments/legacy/train_vqvae.py`
+- `experiments/legacy/train_mgpt_vqvae.py`
+- `experiments/legacy/collators.py`
+- `experiments/legacy/templates.py`
+
+You can keep them for reference or remove them if you do not need historical experiments.
+
+## Notes on compatibility
+
+- Existing root commands still work via thin compatibility wrappers.
+- New modular paths are preferred for future development.
