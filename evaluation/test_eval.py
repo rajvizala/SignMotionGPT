@@ -22,7 +22,7 @@ import numpy as np
 import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
-from config import (
+from configs.config import (
     TEST_EVAL_DOWNLOAD_DIR,
     TEST_EVAL_EXTRACT_DIR,
     TEST_EVAL_HF_REPO,

@@ -11,8 +11,8 @@ import torch
 from typing import List, Tuple, Dict, Optional, Any
 from rapidfuzz.distance import Levenshtein
 from collections import defaultdict
-from data import motion_specials_to_ids
-from config import (
+from datasets.motion_dataset import motion_specials_to_ids
+from configs.config import (
     SEED, PIPELINE_OUTPUT_DIR, M_START, M_END,
     INFERENCE_TEMPERATURE, INFERENCE_TOP_K, INFERENCE_REPETITION_PENALTY
 )

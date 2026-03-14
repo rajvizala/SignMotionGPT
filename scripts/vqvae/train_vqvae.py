@@ -19,8 +19,10 @@ from tqdm import tqdm
 # ==============================================================================
 # Make sure your mGPT folder is in the Python path
 # sys.path.append('/path/to/your/mGPT_folder')
-from mGPT.archs.mgpt_vq import VQVae
-from mGPT.archs.tools import quantize_cnn
+import sys, os
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..'))
+from models.vqvae import VQVae
+from models import quantize_cnn
 
 warnings.filterwarnings("ignore")
 

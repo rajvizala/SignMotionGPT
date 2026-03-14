@@ -16,10 +16,8 @@ import math
 import matplotlib.pyplot as plt
 import sys
 
-# Add the mGPT directory to the path
-sys.path.append('/kaggle/working')
-
-from mGPT.archs.mgpt_vq import VQVae
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..'))
+from models.vqvae import VQVae
 
 warnings.filterwarnings("ignore")
 

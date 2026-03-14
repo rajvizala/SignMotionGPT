@@ -4,7 +4,7 @@ Generation and inference utilities with constrained decoding
 import torch
 from transformers import LogitsProcessor, LogitsProcessorList
 from typing import Dict
-from config import (
+from configs.config import (
     SYSTEM_MSG, GEN_MAX_NEW_TOKENS, GEN_TEMPERATURE,
     GEN_TOP_P, GEN_TOP_K, GEN_NO_REPEAT_NGRAM_SIZE,
     GEN_REPETITION_PENALTY, GEN_END_LOGIT_SLOPE

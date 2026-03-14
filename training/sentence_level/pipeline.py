@@ -50,7 +50,7 @@ from huggingface_hub import HfApi, hf_hub_download, upload_folder
 
 # Import evaluation functions from metrics module
 try:
-    from metrics import (
+    from evaluation.metrics import (
         evaluate_metrics_encoder_style,
         run_inference_on_all_samples,
         evaluate_metrics_motiongpt_style,
@@ -59,7 +59,7 @@ try:
         generate_motion,
     )
 except ImportError:
-    print("Warning: Could not import metrics module. Evaluation will be skipped.")
+    print("Warning: Could not import evaluation.metrics module. Evaluation will be skipped.")
     evaluate_metrics_encoder_style = None
     run_inference_on_all_samples = None
     evaluate_metrics_motiongpt_style = None

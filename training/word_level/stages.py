@@ -17,7 +17,7 @@ from transformers import TrainingArguments, Trainer, AutoModelForCausalLM, AutoT
 from transformers.trainer_callback import TrainerCallback
 from huggingface_hub import HfApi, upload_folder, snapshot_download, hf_hub_download
 
-from config import (
+from configs.config import (
     BATCH_TRAIN, BATCH_EVAL, GRAD_ACCUM, LR, WARMUP,
     LOG_STEPS, EVAL_STEPS, SAVE_STEPS, SEED, DTYPE,
     HUB_REPO_S1, HUB_REPO_S2, HUB_REPO_S3, HF_TOKEN,
@@ -295,7 +295,7 @@ def train_stage1_raw(
     hf_repo_id: Optional[str] = None,
 ):
     """Trains the model on motion sequences only to learn the 'language of motion'."""
-    from data import MotionDataset # Import here to avoid circular imports
+    from datasets.motion_dataset import MotionDataset
     
     print("\n" + "="*80)
     print("      STAGE 1: MOTION LANGUAGE MODELING (PRE-TRAINING)")
@@ -385,7 +385,7 @@ def train_stage2_raw(
     hf_stage_subdir: str = "stage2",
 ):
     """Fine-tunes the motion-aware model to connect text prompts to motions."""
-    from data import TextMotionDataset # Import here to avoid circular imports
+    from datasets.motion_dataset import TextMotionDataset
 
     print("\n" + "="*80)
     print("      STAGE 2: TEXT-TO-MOTION FINE-TUNING")
@@ -480,7 +480,7 @@ def train_stage3_instruct_raw(
     Stage 3 (Instruct): word-only prompt (no participant_id), 1-to-many mapping.
     Each step samples a random motion variant for the word as the supervised target.
     """
-    from data import InstructTextMotionDataset  # Import here to avoid circular imports
+    from datasets.motion_dataset import InstructTextMotionDataset
 
     print("\n" + "="*80)
     print("      STAGE 3: INSTRUCT TUNING (WORD-ONLY, NO PARTICIPANT ID)")

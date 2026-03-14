@@ -35,7 +35,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from config import WORK_DIR, DATA_DIR
+from configs.config import WORK_DIR, DATA_DIR
 
 # Try importing visualization dependencies
 try:
@@ -124,12 +124,7 @@ DEFAULT_DATA_LEVEL = "sentence"  # Changed default to sentence for hybrid pipeli
 # Import VQ-VAE architecture
 # =====================================================================
 try:
-    # Add SignMotionGPT to path if not already
-    sign_mgpt_dir = os.path.join(os.path.dirname(__file__))
-    if sign_mgpt_dir not in sys.path:
-        sys.path.insert(0, sign_mgpt_dir)
-    
-    from mGPT.archs.mgpt_vq import VQVae
+    from models.vqvae import VQVae
 except ImportError as e:
     print(f"❌ Could not import VQVae: {e}")
     print("Make sure mGPT/archs/mgpt_vq.py exists in the project.")
@@ -1754,7 +1749,7 @@ def main():
     if args.prompt:
         # Generate tokens first using inference.py
         print("Generating motion tokens from prompt...")
-        from inference import inference
+        from inference.predict import inference
         tokens = inference(
             prompt=args.prompt,
             stage=args.stage,
