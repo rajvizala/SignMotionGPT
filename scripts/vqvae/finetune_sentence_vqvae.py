@@ -57,10 +57,8 @@ except ImportError:
     HAS_MATPLOTLIB = False
     print("Warning: matplotlib not available. Visualizations will be skipped.")
 
-# Add project root to path
-sys.path.append(os.path.dirname(os.path.abspath(__file__)))
-
-from mGPT.archs.mgpt_vq import VQVae
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..'))
+from models.vqvae import VQVae
 
 # =============================================================================
 # Configuration

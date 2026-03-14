@@ -4,7 +4,7 @@ Model and tokenizer initialization
 import torch
 from typing import List, Set, Tuple
 from transformers import AutoModelForCausalLM, AutoTokenizer
-from config import (
+from configs.config import (
     MODEL_NAME, MAX_SEQ_LEN, DTYPE,
     PAD_TOKEN, M_START, M_END
 )

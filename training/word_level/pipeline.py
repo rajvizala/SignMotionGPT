@@ -13,8 +13,7 @@ from typing import Optional, List, Dict, Any, Tuple
 from collections import defaultdict
 import numpy as np
 
-# Import updated modules
-from config import (
+from configs.config import (
     SEED, DATA_JSON_PATH, MODEL_NAME, PIPELINE_OUTPUT_DIR,
     HF_STAGE1_REPO_ID, HF_STAGE2_REPO_ID, HF_STAGE2_SAVE_SUBDIR,
     HF_STAGE3_REPO_ID, HF_STAGE3_SAVE_SUBDIR,
@@ -23,20 +22,20 @@ from config import (
     TEST_EVAL_OUTPUT_DIR, TEST_EVAL_DOWNLOAD_DIR, TEST_EVAL_EXTRACT_DIR,
     TEST_EVAL_SAMPLE_LIMIT, TEST_EVAL_MAX_ZIPS, TEST_EVAL_HF_REPO, TEST_EVAL_HF_SUBFOLDER
 )
-from data import read_json_data, deduplicate_and_prepare_data, build_motion_vocab
-from model import setup_model_and_tokenizer_raw, ensure_tokenizer_has_motion_tokens
-from train import (
+from datasets.motion_dataset import read_json_data, deduplicate_and_prepare_data, build_motion_vocab
+from models.llm import setup_model_and_tokenizer_raw, ensure_tokenizer_has_motion_tokens
+from training.word_level.stages import (
     train_stage1_raw, train_stage2_raw, train_stage3_instruct_raw, resolve_and_ensure_repo,
     repo_has_stage_latest, load_model_and_tokenizer_from_hf,
     download_training_state, repo_get_latest_epoch_subfolder,
     load_model_and_tokenizer_from_hf_subfolder, download_training_state_from_subfolder
 )
-from metrics import (
+from evaluation.metrics import (
     evaluate_metrics_encoder_style, run_inference_on_all_samples,
     evaluate_metrics_motiongpt_style, save_side_by_side_visualizations,
-    evaluate_stage3_multiref_encoder_style,  # <-- add this
+    evaluate_stage3_multiref_encoder_style,
 )
-import test_dataset_eval
+from evaluation import test_eval
 
 # Suppress warnings
 warnings.filterwarnings("ignore")
@@ -350,12 +349,12 @@ def main():
                     extract_root = os.path.join(TEST_EVAL_EXTRACT_DIR, "from_local_zips")
                     os.makedirs(extract_root, exist_ok=True)
                     print(f"Detected zip archives in local dir (no video_data.pkl found). Extracting to: {extract_root}")
-                    zips = test_dataset_eval.list_zip_files(local_dir)
+                    zips = test_eval.list_zip_files(local_dir)
                     if not zips:
                         print("⚠️  No zip files found under --test-local-extracted-dir.")
                     else:
                         # Extract and then point evaluation to the extraction root
-                        test_dataset_eval.extract_zip_files(zips, extract_root, limit=args.test_max_zips)
+                        test_eval.extract_zip_files(zips, extract_root, limit=args.test_max_zips)
                         local_dir = extract_root
 
                 print("Calling test_dataset_eval.run_evaluation...")
@@ -383,7 +382,7 @@ def main():
                     include_participant_in_prompt=(last_trained_stage != "stage3"),
                     k_samples=(10 if last_trained_stage == "stage3" else 1),
                 )
-                test_dataset_eval.run_evaluation(eval_args)
+                test_eval.run_evaluation(eval_args)
         except Exception as e:
             print(f"⚠️  Test dataset evaluation failed: {e}")
 

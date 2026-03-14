@@ -11,14 +11,14 @@ import torch
 import random
 from pathlib import Path
 
-from config import (
+from configs.config import (
     MODEL_NAME, PIPELINE_OUTPUT_DIR, CHECKPOINTS_DIR,
     OUT_S1, OUT_S2, OUT_S3, M_START, M_END,
     INFERENCE_TEMPERATURE, INFERENCE_TOP_K, INFERENCE_REPETITION_PENALTY
 )
-from data import read_json_data, deduplicate_and_prepare_data
-from model import setup_model_and_tokenizer_raw, ensure_tokenizer_has_motion_tokens
-from metrics import generate_motion, build_instruction_prompt
+from datasets.motion_dataset import read_json_data, deduplicate_and_prepare_data
+from models.llm import setup_model_and_tokenizer_raw, ensure_tokenizer_has_motion_tokens
+from evaluation.metrics import generate_motion, build_instruction_prompt
 
 def load_trained_model(stage: int, device: torch.device):
     """

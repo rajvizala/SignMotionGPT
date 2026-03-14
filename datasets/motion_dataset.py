@@ -9,7 +9,7 @@ from collections import defaultdict
 import torch
 from torch.utils.data import Dataset, DataLoader
 from transformers import AutoTokenizer
-from config import M_START, M_END, PAD_TOKEN
+from configs.config import M_START, M_END, PAD_TOKEN
 
 # ======================================================================================
 # Logic from test_overfit.py

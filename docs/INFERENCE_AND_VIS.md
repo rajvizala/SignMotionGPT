@@ -10,22 +10,22 @@ After training your 3-stage SignMotionGPT model, use these scripts to generate a
 ### Basic Usage
 ```bash
 # Generate from Stage 3 model (recommended)
-python inference.py --prompt "walking forward"
+python -m inference.predict --prompt "walking forward"
 
 # Try different stages
-python inference.py --prompt "dancing" --stage 1  # Motion-only LM
-python inference.py --prompt "dancing" --stage 2  # Multi-task
-python inference.py --prompt "dancing" --stage 3  # T2M SFT (best quality)
+python -m inference.predict --prompt "dancing" --stage 1  # Motion-only LM
+python -m inference.predict --prompt "dancing" --stage 2  # Multi-task
+python -m inference.predict --prompt "dancing" --stage 3  # T2M SFT (best quality)
 ```
 
 ### Save Output
 ```bash
-python inference.py --prompt "jumping" --output my_motion.txt
+python -m inference.predict --prompt "jumping" --output my_motion.txt
 ```
 
 ### With Participant ID
 ```bash
-python inference.py --prompt "yoga pose" --pid P40
+python -m inference.predict --prompt "yoga pose" --pid P40
 ```
 
 ### Expected Output
@@ -78,18 +78,18 @@ export SMPLX_MODEL_DIR=/path/to/smplx_models
 
 ```bash
 # Visualize token string
-python visualize.py --tokens "<MOT_BEGIN><motion_177><motion_135>...<MOT_END>"
+python -m visualization.visualize --tokens "<MOT_BEGIN><motion_177><motion_135>...<MOT_END>"
 
 # Visualize from file
-python visualize.py --input my_motion.txt
+python -m visualization.visualize --input my_motion.txt
 
 # Generate + visualize in one command
-python visualize.py --prompt "walking" --stage 3
+python -m visualization.visualize --prompt "walking" --stage 3
 ```
 
 ### Custom Output
 ```bash
-python visualize.py \
+python -m visualization.visualize \
   --input motion_tokens.txt \
   --output walk_animation.html \
   --title "Walking Forward" \
@@ -98,7 +98,7 @@ python visualize.py \
 
 ### With Custom Paths
 ```bash
-python visualize.py \
+python -m visualization.visualize \
   --tokens "<MOT_BEGIN>..." \
   --vqvae-ckpt /custom/vqvae.pt \
   --stats /custom/stats.pt \
@@ -143,17 +143,17 @@ Motion Visualization Pipeline
 
 ### A. Train (already done)
 ```bash
-python train_pipeline.py
+python -m training.word_level.pipeline
 ```
 
 ### B. Generate Motion Tokens
 ```bash
-python inference.py --prompt "college" --stage 3 --output college_motion.txt
+python -m inference.predict --prompt "college" --stage 3 --output college_motion.txt
 ```
 
 ### C. Visualize
 ```bash
-python visualize.py --input college_motion.txt --output college_animation.html
+python -m visualization.visualize --input college_motion.txt --output college_animation.html
 ```
 
 ### D. View Animation
@@ -171,7 +171,7 @@ Open `college_animation.html` in a browser. You'll see an interactive 3D SMPL-X 
 
 **"Dataset not found"**
 - Inference needs the dataset to build vocabulary
-- Set `DATA_JSON_PATH` in `config.py` or via environment variable
+- Set `DATA_JSON_PATH` in `configs/config.py` or via environment variable
 
 ### Visualization Issues
 
@@ -207,7 +207,7 @@ Open `college_animation.html` in a browser. You'll see an interactive 3D SMPL-X 
 | `VIS_OUTPUT_DIR` | Output directory for animations | `WORK_DIR` |
 
 ### VQ-VAE Architecture (must match training)
-In `visualize.py`:
+In `visualization/visualize.py`:
 ```python
 SMPL_DIM = 182           # SMPL-X parameter dimension
 CODEBOOK_SIZE = 512      # Motion vocabulary size
@@ -248,6 +248,6 @@ VQ_ARGS = dict(
 
 - **Batch Inference**: Loop over multiple prompts and save outputs
 - **Evaluate Quality**: Compare generated tokens to ground truth using edit distance
-- **Fine-tune Generation**: Adjust `GEN_TEMPERATURE`, `GEN_TOP_P` in `config.py`
-- **Export to Other Formats**: Extend `visualize.py` to export BVH, FBX, or USD
+- **Fine-tune Generation**: Adjust `GEN_TEMPERATURE`, `GEN_TOP_P` in `configs/config.py`
+- **Export to Other Formats**: Extend `visualization/visualize.py` to export BVH, FBX, or USD
 
