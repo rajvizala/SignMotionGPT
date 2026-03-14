@@ -563,7 +563,7 @@ def _get_smplx_model_for_metrics(device: str = "cpu"):
         return _smplx_model_cache[key]
 
     try:
-        from visualize import load_smplx_model, SMPLX_MODEL_DIR as DEFAULT_SMPLX_DIR
+        from signmotion_gpt.visualization.visualize import load_smplx_model, SMPLX_MODEL_DIR as DEFAULT_SMPLX_DIR
         smplx_dir = os.environ.get("SMPLX_MODEL_DIR", DEFAULT_SMPLX_DIR)
         smplx_m = load_smplx_model(smplx_dir, device=device)
         _smplx_model_cache[key] = smplx_m
@@ -1252,12 +1252,12 @@ def evaluate_metrics_encoder_style(
     print("="*80)
     # Lazy import to reuse your visualization utilities and stats
     try:
-        from visualize import load_vqvae, load_stats, VQVAE_CHECKPOINT as DEFAULT_VQ, STATS_PATH as DEFAULT_STATS
+        from signmotion_gpt.visualization.visualize import load_vqvae, load_stats, VQVAE_CHECKPOINT as DEFAULT_VQ, STATS_PATH as DEFAULT_STATS
         vq_ckpt = vqvae_ckpt or os.getenv("VQVAE_CHECKPOINT", DEFAULT_VQ)
         stats_p = stats_path or os.getenv("VQVAE_STATS_PATH", DEFAULT_STATS)
         vq_model = load_vqvae(vq_ckpt, device=device)
         mean, std = load_stats(stats_p)
-        from visualize import decode_tokens_to_params
+        from signmotion_gpt.visualization.visualize import decode_tokens_to_params
     except Exception as exc:
         print(f"[Warning]  Could not set up VQ-VAE encoder metrics: {exc}")
         return {}
@@ -1341,7 +1341,7 @@ def save_side_by_side_visualizations(
         output_format: "video" (default, PyRender MP4) or "html" (Plotly interactive)
     """
     try:
-        from visualize import (
+        from signmotion_gpt.visualization.visualize import (
             load_vqvae, load_stats, load_smplx_model,
             decode_tokens_to_params, params_to_vertices,
             VQVAE_CHECKPOINT as DEFAULT_VQ, STATS_PATH as DEFAULT_STATS, SMPLX_MODEL_DIR as DEFAULT_SMPLX
@@ -1353,7 +1353,7 @@ def save_side_by_side_visualizations(
     # Try to import optional video rendering (may not exist in visualize.py)
     render_side_by_side_video = None
     try:
-        from visualize import render_side_by_side_video, ensure_pyrender
+        from signmotion_gpt.visualization.visualize import render_side_by_side_video, ensure_pyrender
     except ImportError:
         pass
 
@@ -1774,7 +1774,7 @@ def _load_vqvae_helpers_for_metrics(device, vqvae_ckpt: Optional[str] = None, st
     Shared loader for Stage 3 multi-ref encoder-based evaluation.
     Returns: (vq_model, mean, std, decode_tokens_to_params)
     """
-    from visualize import load_vqvae, load_stats, decode_tokens_to_params, VQVAE_CHECKPOINT as DEFAULT_VQ, STATS_PATH as DEFAULT_STATS
+    from signmotion_gpt.visualization.visualize import load_vqvae, load_stats, decode_tokens_to_params, VQVAE_CHECKPOINT as DEFAULT_VQ, STATS_PATH as DEFAULT_STATS
     vq_ckpt = vqvae_ckpt or os.getenv("VQVAE_CHECKPOINT", DEFAULT_VQ)
     stats_p = stats_path or os.getenv("VQVAE_STATS_PATH", DEFAULT_STATS)
     vq_model = load_vqvae(vq_ckpt, device=device)

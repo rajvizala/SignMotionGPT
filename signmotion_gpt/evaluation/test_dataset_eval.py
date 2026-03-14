@@ -180,7 +180,7 @@ def load_smplx_params_from_pkl(pkl_path: str) -> Optional[np.ndarray]:
 
 def import_visualize_helpers():
     try:
-        from visualize import (
+        from signmotion_gpt.visualization.visualize import (
             load_vqvae,
             load_stats,
             decode_tokens_to_params,
