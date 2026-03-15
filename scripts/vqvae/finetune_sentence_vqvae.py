@@ -45,7 +45,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torch.utils.data import Dataset, DataLoader, ConcatDataset, WeightedRandomSampler
+from torch.utils.data import Dataset, DataLoader, ConcatDataset, WeightedRandomSampler, random_split
 from torch.optim import AdamW
 from torch.optim.lr_scheduler import CosineAnnealingLR
 from tqdm import tqdm
@@ -283,11 +283,13 @@ class WordLevelDataset(Dataset):
     """
     
     def __init__(self, root_dir: str, stats_path: Optional[str] = None,
-                 min_seq_len: int = 16, max_seq_len: int = 256):
+                 min_seq_len: int = 16, max_seq_len: int = 256,
+                 data_type: str = "word"):
         self.min_seq_len = min_seq_len
         self.max_seq_len = max_seq_len
+        self.data_type = data_type
         
-        print(f"\n[WordLevelDataset] Loading from: {root_dir}")
+        print(f"\n[NPZDataset ({data_type})] Loading from: {root_dir}")
         
         # Find all NPZ files
         glob_pattern = os.path.join(root_dir, "**", "*.npz")
@@ -345,7 +347,7 @@ class WordLevelDataset(Dataset):
         
         return {
             "motion": motion_normalized,
-            "type": "word",
+            "type": self.data_type,
             "source": "npz"
         }
 
@@ -589,7 +591,8 @@ def preload_word_level_data(
     stats_path: Optional[str] = None,
     min_seq_len: int = 16,
     max_seq_len: int = 256,
-    show_progress: bool = True
+    show_progress: bool = True,
+    data_type: str = "word"
 ) -> PreloadedDataset:
     """
     Load ALL word-level NPZ files into memory.
@@ -662,7 +665,7 @@ def preload_word_level_data(
             
             loaded_data.append({
                 "motion": motion_normalized,
-                "type": "word",
+                "type": data_type,
                 "source": "npz"
             })
             
@@ -676,7 +679,7 @@ def preload_word_level_data(
     print(f"  Memory usage: ~{sum(d['motion'].numel() * 4 for d in loaded_data) / 1024 / 1024:.1f} MB")
     print(f"{'='*60}\n")
     
-    return PreloadedDataset(loaded_data, "word")
+    return PreloadedDataset(loaded_data, data_type)
 
 
 def preload_sentence_level_data(
@@ -958,12 +961,55 @@ def collate_fn_mixed(batch):
     }
 
 
+def directory_has_npz_data(root_dir: str) -> bool:
+    return bool(root_dir and os.path.exists(root_dir) and glob.glob(os.path.join(root_dir, "**", "*.npz"), recursive=True))
+
+
+def build_sequence_dataset(
+    root_dir: str,
+    stats_path: Optional[str],
+    max_seq_len: int,
+    preload: bool,
+    show_progress: bool = False,
+    data_type: str = "sentence",
+) -> Dataset:
+    if directory_has_npz_data(root_dir):
+        if preload:
+            return preload_word_level_data(
+                root_dir=root_dir,
+                stats_path=stats_path,
+                max_seq_len=max_seq_len,
+                show_progress=show_progress,
+                data_type=data_type,
+            )
+        return WordLevelDataset(
+            root_dir=root_dir,
+            stats_path=stats_path,
+            max_seq_len=max_seq_len,
+            data_type=data_type,
+        )
+
+    if preload:
+        return preload_sentence_level_data(
+            root_dir=root_dir,
+            stats_path=stats_path,
+            max_seq_len=max_seq_len,
+            show_progress=show_progress,
+        )
+    return SentenceLevelDataset(
+        root_dir=root_dir,
+        stats_path=stats_path,
+        max_seq_len=max_seq_len,
+    )
+
+
 def create_mixed_dataloader(
     word_dataset: Dataset,
     sentence_dataset: Dataset,
     word_ratio: float = 0.2,
     batch_size: int = 8,
-    num_workers: int = 0
+    num_workers: int = 0,
+    verbose: bool = True,
 ) -> DataLoader:
     """
     Create a dataloader that samples from both datasets with specified ratio.
@@ -1000,12 +1046,13 @@ def create_mixed_dataloader(
         replacement=True
     )
     
-    print(f"\n[Mixed DataLoader]")
-    print(f"  Word-level samples: {word_len}")
-    print(f"  Sentence-level samples: {sentence_len}")
-    print(f"  Word ratio: {word_ratio:.1%}")
-    print(f"  Expected word samples per epoch: ~{int(total_len * word_ratio)}")
-    print(f"  Expected sentence samples per epoch: ~{int(total_len * (1 - word_ratio))}")
+    if verbose:
+        print(f"\n[Mixed DataLoader]")
+        print(f"  Word-level samples: {word_len}")
+        print(f"  Sentence-level samples: {sentence_len}")
+        print(f"  Word ratio: {word_ratio:.1%}")
+        print(f"  Expected word samples per epoch: ~{int(total_len * word_ratio)}")
+        print(f"  Expected sentence samples per epoch: ~{int(total_len * (1 - word_ratio))}")
     
     return DataLoader(
         combined_dataset,
@@ -1015,6 +1062,22 @@ def create_mixed_dataloader(
         num_workers=num_workers,
         pin_memory=True,
         drop_last=True
+    )
+
+
+def create_val_dataloader(
+    val_dataset: Dataset,
+    batch_size: int = 8,
+    num_workers: int = 0,
+) -> DataLoader:
+    return DataLoader(
+        val_dataset,
+        batch_size=batch_size,
+        shuffle=False,
+        collate_fn=collate_fn_mixed,
+        num_workers=num_workers,
+        pin_memory=True,
+        drop_last=False,
     )
 
 
@@ -1039,6 +1102,15 @@ class FinetuneTrainer:
         scheduler_type: str = "constant",
         num_epochs: int = 100,
         restart_period: int = 100,
+        word_dataset: Optional[Dataset] = None,
+        sentence_dataset: Optional[Dataset] = None,
+        batch_size: int = 8,
+        num_workers: int = 0,
+        word_ratio_start: float = 0.2,
+        word_ratio_end: Optional[float] = None,
+        word_ratio_ramp_epochs: Optional[int] = None,
+        codebook_balance_weight: float = 0.0,
+        early_stopping_patience: int = 0,
         device=DEVICE
     ):
         self.model = model.to(device)
@@ -1054,6 +1126,15 @@ class FinetuneTrainer:
         self.scheduler_type = scheduler_type
         self.num_epochs = num_epochs
         self.restart_period = restart_period
+        self.word_dataset = word_dataset
+        self.sentence_dataset = sentence_dataset
+        self.batch_size = batch_size
+        self.num_workers = num_workers
+        self.word_ratio_start = word_ratio_start
+        self.word_ratio_end = word_ratio_end if word_ratio_end is not None else word_ratio_start
+        self.word_ratio_ramp_epochs = word_ratio_ramp_epochs if word_ratio_ramp_epochs is not None else num_epochs
+        self.codebook_balance_weight = codebook_balance_weight
+        self.early_stopping_patience = early_stopping_patience
         self.start_epoch = 1  # Will be updated if resuming from checkpoint
         
         # Create output directories
@@ -1081,7 +1162,12 @@ class FinetuneTrainer:
             "perplexity": [],
             "word_loss": [],
             "sentence_loss": [],
-            "codebook_usage": []
+            "body_loss": [],
+            "codebook_penalty": [],
+            "codebook_usage": [],
+            "val_loss": [],
+            "learning_rate": [],
+            "word_ratio": [],
         }
     
     def _create_scheduler(self, scheduler_type: str, num_epochs: int, restart_period: int = 50):
@@ -1109,10 +1195,33 @@ class FinetuneTrainer:
             # Step decay: reduce LR by 0.5 every restart_period epochs
             from torch.optim.lr_scheduler import StepLR
             return StepLR(self.optimizer, step_size=restart_period, gamma=0.5)
+        elif scheduler_type == "plateau":
+            from torch.optim.lr_scheduler import ReduceLROnPlateau
+            return ReduceLROnPlateau(self.optimizer, mode="min", factor=0.5, patience=max(1, restart_period), min_lr=1e-6)
         else:
             # Default to constant for stability
             from torch.optim.lr_scheduler import LambdaLR
             return LambdaLR(self.optimizer, lr_lambda=lambda epoch: 1.0)
+
+    def _current_word_ratio(self, epoch: int) -> float:
+        if self.word_ratio_ramp_epochs <= 1 or self.word_ratio_start == self.word_ratio_end:
+            return self.word_ratio_end
+        progress = min(1.0, max(0.0, (epoch - 1) / max(1, self.word_ratio_ramp_epochs - 1)))
+        return self.word_ratio_start + (self.word_ratio_end - self.word_ratio_start) * progress
+
+    def _refresh_train_dataloader(self, epoch: int) -> float:
+        if self.word_dataset is None or self.sentence_dataset is None:
+            return self.word_ratio_start
+        current_ratio = self._current_word_ratio(epoch)
+        self.dataloader = create_mixed_dataloader(
+            word_dataset=self.word_dataset,
+            sentence_dataset=self.sentence_dataset,
+            word_ratio=current_ratio,
+            batch_size=self.batch_size,
+            num_workers=self.num_workers,
+            verbose=False,
+        )
+        return current_ratio
     
     def reset_learning_rate(self, new_lr: Optional[float] = None, warmup_epochs: int = 5):
         """
@@ -1268,6 +1377,12 @@ class FinetuneTrainer:
         hand_mask = mask.unsqueeze(-1).expand(-1, -1, 90)
         hand_loss_raw = (hand_recon - hand_target) ** 2
         hand_loss = (hand_loss_raw * hand_mask).sum() / (hand_mask.sum() + 1e-8)
+
+        body_target = motion[:, :, 10:73]
+        body_recon = x_recon[:, :, 10:73]
+        body_mask = mask.unsqueeze(-1).expand(-1, -1, 63)
+        body_loss_raw = (body_recon - body_target) ** 2
+        body_loss = (body_loss_raw * body_mask).sum() / (body_mask.sum() + 1e-8)
         
         # ============================================================
         # 4. Combined Total Loss
@@ -1275,12 +1390,14 @@ class FinetuneTrainer:
         # Loss weights (tunable)
         vel_weight = getattr(self, 'vel_loss_weight', 0.5)
         hand_weight = getattr(self, 'hand_loss_weight', 0.5)
+        codebook_penalty = torch.relu(torch.tensor(200.0, device=self.device) - perplexity) / 200.0
         
         total_loss = (
             recon_loss + 
             self.vq_loss_weight * vq_loss +
             vel_weight * vel_loss +
-            hand_weight * hand_loss
+            hand_weight * hand_loss +
+            self.codebook_balance_weight * codebook_penalty
         )
         
         # ============================================================
@@ -1301,9 +1418,11 @@ class FinetuneTrainer:
             "vq_loss": vq_loss.item(),
             "vel_loss": vel_loss.item(),
             "hand_loss": hand_loss.item(),
+            "body_loss": body_loss.item(),
             "perplexity": perplexity.item(),
             "word_loss": word_loss.item(),
-            "sentence_loss": sentence_loss.item()
+            "sentence_loss": sentence_loss.item(),
+            "codebook_penalty": codebook_penalty.item(),
         }
         
         return total_loss, metrics
@@ -1332,6 +1451,22 @@ class FinetuneTrainer:
         total_codes = VQ_CONFIG["code_num"]
         
         return (unique_codes / total_codes) * 100
+
+    def validate_epoch(self, val_dataloader: Optional[DataLoader]) -> float:
+        if val_dataloader is None:
+            return float("nan")
+        self.model.eval()
+        losses = []
+        with torch.no_grad():
+            for batch in val_dataloader:
+                if batch is None:
+                    continue
+                _, metrics = self.compute_loss(batch)
+                losses.append(metrics["recon_loss"])
+        self.model.train()
+        if not losses:
+            return float("inf")
+        return float(np.mean(losses))
     
     def train_epoch(self, epoch: int) -> Dict:
         """Train for one epoch."""
@@ -1372,14 +1507,12 @@ class FinetuneTrainer:
                 "hand": f"{metrics['hand_loss']:.4f}",
                 "ppl": f"{metrics['perplexity']:.1f}"
             })
-        
-        # Step scheduler
-        self.scheduler.step()
-        
+
         # Compute epoch averages
         avg_metrics = {k: np.mean(v) for k, v in epoch_metrics.items()}
         avg_metrics["word_count"] = type_counts["word"]
         avg_metrics["sentence_count"] = type_counts["sentence"]
+        avg_metrics["learning_rate"] = self.optimizer.param_groups[0]['lr']
         
         # Compute codebook usage
         avg_metrics["codebook_usage"] = self.compute_codebook_usage()
@@ -1451,6 +1584,9 @@ class FinetuneTrainer:
         
         # Reconstruction loss
         axes[0, 1].plot(self.history["epoch"], self.history["recon_loss"])
+        if any(np.isfinite(v) for v in self.history["val_loss"]):
+            axes[0, 1].plot(self.history["epoch"], self.history["val_loss"], label="Val")
+            axes[0, 1].legend()
         axes[0, 1].set_xlabel("Epoch")
         axes[0, 1].set_ylabel("Recon Loss")
         axes[0, 1].set_title("Reconstruction Loss")
@@ -1492,7 +1628,7 @@ class FinetuneTrainer:
         plt.savefig(os.path.join(self.output_dir, "training_history.png"), dpi=150)
         plt.close()
     
-    def train(self, num_epochs: int, save_every: int = 10):
+    def train(self, num_epochs: int, save_every: int = 10, val_dataloader: Optional[DataLoader] = None):
         """
         Full training loop with checkpoint resumption support.
         
@@ -1513,6 +1649,8 @@ class FinetuneTrainer:
         print(f"  VQ loss weight: {self.vq_loss_weight}")
         print(f"  Velocity loss weight: {self.vel_loss_weight}")
         print(f"  Hand loss weight: {self.hand_loss_weight}")
+        print(f"  Codebook balance weight: {self.codebook_balance_weight}")
+        print(f"  Word ratio schedule: {self.word_ratio_start:.1%} -> {self.word_ratio_end:.1%} over {self.word_ratio_ramp_epochs} epochs")
         print(f"  Save every: {save_every} epochs")
         print(f"  Device: {self.device}")
         print(f"{'='*60}\n")
@@ -1522,13 +1660,44 @@ class FinetuneTrainer:
             print(f"Training already completed! (start_epoch={self.start_epoch} > num_epochs={num_epochs})")
             return
         
+        best_val_loss = float("inf")
+        epochs_without_improvement = 0
+
         for epoch in range(self.start_epoch, num_epochs + 1):
+            current_word_ratio = self._refresh_train_dataloader(epoch)
             metrics = self.train_epoch(epoch)
+            val_loss = self.validate_epoch(val_dataloader)
+
+            if self.scheduler_type == "plateau":
+                self.scheduler.step(val_loss if np.isfinite(val_loss) else metrics["recon_loss"])
+            else:
+                self.scheduler.step()
+
+            if np.isfinite(val_loss) and val_loss < best_val_loss:
+                best_val_loss = val_loss
+                best_path = os.path.join(self.output_dir, "vqvae_best.pt")
+                torch.save({
+                    "epoch": epoch,
+                    "model_state_dict": self.model.state_dict(),
+                    "val_loss": val_loss,
+                    "metrics": metrics,
+                    "history": self.history,
+                    "config": VQ_CONFIG,
+                    "timestamp": datetime.now().isoformat(),
+                }, best_path)
+                print(f"  New best val loss: {val_loss:.6f} -> saved vqvae_best.pt")
+                epochs_without_improvement = 0
+            elif np.isfinite(val_loss):
+                epochs_without_improvement += 1
             
             # Update history
             self.history["epoch"].append(epoch)
+            self.history["val_loss"].append(val_loss if np.isfinite(val_loss) else float("nan"))
+            self.history["learning_rate"].append(self.optimizer.param_groups[0]['lr'])
+            self.history["word_ratio"].append(current_word_ratio)
             for k in ["total_loss", "recon_loss", "vq_loss", "vel_loss", "hand_loss",
-                      "perplexity", "word_loss", "sentence_loss", "codebook_usage"]:
+                      "body_loss", "perplexity", "word_loss", "sentence_loss",
+                      "codebook_penalty", "codebook_usage"]:
                 self.history[k].append(metrics.get(k, 0))
             
             # Print epoch summary
@@ -1537,11 +1706,17 @@ class FinetuneTrainer:
             print(f"  Recon Loss: {metrics['recon_loss']:.4f}")
             print(f"  Vel Loss: {metrics['vel_loss']:.4f}")
             print(f"  Hand Loss: {metrics['hand_loss']:.4f}")
+            print(f"  Body Loss: {metrics['body_loss']:.4f}")
             print(f"  VQ Loss: {metrics['vq_loss']:.6f}")
             print(f"  Perplexity: {metrics['perplexity']:.2f}")
             print(f"  Word Loss: {metrics['word_loss']:.4f} ({metrics['word_count']} samples)")
             print(f"  Sentence Loss: {metrics['sentence_loss']:.4f} ({metrics['sentence_count']} samples)")
             print(f"  Codebook Usage: {metrics['codebook_usage']:.1f}%")
+            print(f"  Codebook Penalty: {metrics['codebook_penalty']:.4f}")
+            print(f"  Learning Rate: {self.optimizer.param_groups[0]['lr']:.2e}")
+            print(f"  Word Ratio: {current_word_ratio:.1%}")
+            if np.isfinite(val_loss):
+                print(f"  Val Recon Loss: {val_loss:.6f}")
             
             # Save checkpoint (to both local and GDrive)
             if epoch % save_every == 0 or epoch == num_epochs:
@@ -1552,6 +1727,10 @@ class FinetuneTrainer:
             history_path = os.path.join(self.output_dir, "training_history.json")
             with open(history_path, 'w') as f:
                 json.dump(self.history, f, indent=2)
+
+            if self.early_stopping_patience > 0 and epochs_without_improvement >= self.early_stopping_patience:
+                print(f"\nEarly stopping triggered after {epochs_without_improvement} epochs without validation improvement.")
+                break
         
         print(f"\n{'='*60}")
         print(f"  Fine-tuning Complete!")
@@ -1719,16 +1898,22 @@ def parse_args():
                        help="Number of training epochs (default: 50)")
     parser.add_argument("--batch-size", type=int, default=8,
                        help="Batch size (default: 8)")
-    parser.add_argument("--learning-rate", type=float, default=1e-5,
-                       help="Learning rate (default: 1e-5)")
+    parser.add_argument("--learning-rate", type=float, default=3e-5,
+                       help="Learning rate (default: 3e-5)")
     parser.add_argument("--word-ratio", type=float, default=0.2,
                        help="Ratio of word-level data in each batch (default: 0.2)")
+    parser.add_argument("--word-ratio-end", type=float, default=0.05,
+                       help="Final word-level ratio after ramping (default: 0.05)")
+    parser.add_argument("--word-ratio-ramp-epochs", type=int, default=20,
+                       help="Epochs used to ramp from --word-ratio to --word-ratio-end (default: 20)")
     parser.add_argument("--vq-loss-weight", type=float, default=0.25,
                        help="Weight for VQ commitment loss (default: 0.25)")
     parser.add_argument("--vel-loss-weight", type=float, default=0.5,
                        help="Weight for velocity (temporal smoothness) loss (default: 0.5)")
     parser.add_argument("--hand-loss-weight", type=float, default=0.5,
                        help="Weight for hand reconstruction loss (default: 0.5)")
+    parser.add_argument("--codebook-balance-weight", type=float, default=0.02,
+                       help="Weight for a low-perplexity penalty that discourages codebook collapse (default: 0.02)")
     parser.add_argument("--save-every", type=int, default=5,
                        help="Save checkpoint every N epochs (default: 5)")
     parser.add_argument("--max-seq-len", type=int, default=512,
@@ -1759,6 +1944,8 @@ def parse_args():
     # GDrive checkpoint options
     parser.add_argument("--gdrive-dir", default=GDRIVE_CHECKPOINT_DIR,
                        help=f"GDrive directory for saving checkpoints (default: {GDRIVE_CHECKPOINT_DIR})")
+    parser.add_argument("--val-data-dir", default=None,
+                       help="Optional validation directory. Supports sentence NPZ folders and *_3D.pkl folders.")
     parser.add_argument("--no-resume", action="store_true",
                        help="Do not resume from existing checkpoint. Start fresh from the base VQ-VAE.")
     
@@ -1766,17 +1953,20 @@ def parse_args():
     parser.add_argument("--reset-lr", action="store_true",
                        help="Reset learning rate and scheduler when resuming. Use this if LR has decayed to zero.")
     parser.add_argument("--lr-scheduler", 
-                       choices=["cosine", "cosine_restart", "cosine_restart_gradual", "constant", "step"], 
-                       default="constant",
-                       help="Learning rate scheduler type (default: constant). "
+                       choices=["cosine", "cosine_restart", "cosine_restart_gradual", "constant", "step", "plateau"], 
+                       default="plateau",
+                       help="Learning rate scheduler type (default: plateau). "
                             "Options: 'constant' (stable, recommended for late-stage), "
                             "'cosine_restart' (restarts can cause spikes!), "
                             "'cosine_restart_gradual' (each cycle 2x longer), "
-                            "'step' (halve LR every N epochs)")
+                            "'step' (halve LR every N epochs), "
+                            "'plateau' (halve LR when validation stalls, recommended for fine-tuning)")
     parser.add_argument("--lr-warmup-epochs", type=int, default=5,
                        help="Number of warmup epochs when resetting LR (default: 5)")
-    parser.add_argument("--lr-restart-period", type=int, default=100,
-                       help="Period for LR restart/step schedulers (default: 100 epochs)")
+    parser.add_argument("--lr-restart-period", type=int, default=5,
+                       help="Restart period for cosine/step schedulers and patience for plateau scheduler (default: 5 epochs)")
+    parser.add_argument("--early-stopping-patience", type=int, default=15,
+                       help="Stop training if validation does not improve for N epochs. Set 0 to disable. (default: 15)")
     
     return parser.parse_args()
 
@@ -1806,10 +1996,14 @@ def main():
     print(f"  Epochs: {args.epochs}")
     print(f"  Batch Size: {args.batch_size}")
     print(f"  Learning Rate: {args.learning_rate:.2e}")
-    print(f"  Word Ratio: {args.word_ratio:.1%}")
+    print(f"  Word Ratio: {args.word_ratio:.1%} -> {args.word_ratio_end:.1%}")
     print(f"  VQ Loss Weight: {args.vq_loss_weight}")
     print(f"  Vel Loss Weight: {args.vel_loss_weight}")
     print(f"  Hand Loss Weight: {args.hand_loss_weight}")
+    print(f"  Codebook Balance Weight: {args.codebook_balance_weight}")
+    print(f"  Validation Dir: {args.val_data_dir}")
+    print(f"  LR Scheduler: {args.lr_scheduler}")
+    print(f"  Early Stopping Patience: {args.early_stopping_patience}")
     print(f"  Preload Mode: {'ENABLED (all data in RAM)' if args.preload else 'DISABLED (load on-the-fly)'}")
     print(f"  Auto-Resume: {'DISABLED (--no-resume)' if args.no_resume else 'ENABLED'}")
     print(f"  Training Mode: {mode.upper()}")
@@ -1836,71 +2030,39 @@ def main():
     # Load base model (will be overwritten if resuming)
     model = load_vqvae_checkpoint(args.vqvae_ckpt, VQ_CONFIG, DEVICE)
     
-    # Create datasets (with or without preloading)
     if args.preload:
-        # =====================================================================
-        # PRELOAD MODE: Load ALL data into RAM first
-        # =====================================================================
         print("\n" + "="*70)
         print("  PRELOAD MODE: Loading all data into RAM...")
         print("  This may take a while but training will be MUCH faster!")
         print("="*70)
-        
-        import time
-        preload_start = time.time()
-        
-        # Only load what we need based on mode
-        if mode in ["mixed", "word-only", "validate"]:
-            word_dataset = preload_word_level_data(
-                root_dir=args.word_data_dir,
-                stats_path=args.stats_path,
-                max_seq_len=args.max_seq_len,
-                show_progress=True
-            )
-        else:
-            word_dataset = PreloadedDataset([], "word")
-        
-        if mode in ["mixed", "sentence-only", "validate"]:
-            sentence_dataset = preload_sentence_level_data(
-                root_dir=args.sentence_data_dir,
-                stats_path=args.stats_path,
-                max_seq_len=args.max_seq_len,
-                show_progress=True
-            )
-        else:
-            sentence_dataset = PreloadedDataset([], "sentence")
-        
-        preload_time = time.time() - preload_start
-        total_samples = len(word_dataset) + len(sentence_dataset)
-        print(f"\n{'='*70}")
-        print(f"  PRELOAD COMPLETE!")
-        print(f"  Total samples in RAM: {total_samples}")
-        print(f"  Word-level: {len(word_dataset)} samples")
-        print(f"  Sentence-level: {len(sentence_dataset)} samples")
-        print(f"  Preload time: {preload_time:.1f}s")
-        print(f"{'='*70}\n")
-        
+
+    if mode in ["mixed", "word-only", "validate"]:
+        word_dataset = preload_word_level_data(
+            root_dir=args.word_data_dir,
+            stats_path=args.stats_path,
+            max_seq_len=args.max_seq_len,
+            show_progress=args.preload,
+            data_type="word",
+        ) if args.preload else WordLevelDataset(
+            root_dir=args.word_data_dir,
+            stats_path=args.stats_path,
+            max_seq_len=args.max_seq_len,
+            data_type="word",
+        )
     else:
-        # =====================================================================
-        # STANDARD MODE: Load data on-demand during training
-        # =====================================================================
-        if mode in ["mixed", "word-only", "validate"]:
-            word_dataset = WordLevelDataset(
-                root_dir=args.word_data_dir,
-                stats_path=args.stats_path,
-                max_seq_len=args.max_seq_len
-            )
-        else:
-            word_dataset = PreloadedDataset([], "word")
-        
-        if mode in ["mixed", "sentence-only", "validate"]:
-            sentence_dataset = SentenceLevelDataset(
-                root_dir=args.sentence_data_dir,
-                stats_path=args.stats_path,
-                max_seq_len=args.max_seq_len
-            )
-        else:
-            sentence_dataset = PreloadedDataset([], "sentence")
+        word_dataset = PreloadedDataset([], "word")
+
+    if mode in ["mixed", "sentence-only", "validate"]:
+        sentence_dataset = build_sequence_dataset(
+            root_dir=args.sentence_data_dir,
+            stats_path=args.stats_path,
+            max_seq_len=args.max_seq_len,
+            preload=args.preload,
+            show_progress=args.preload,
+            data_type="sentence",
+        )
+    else:
+        sentence_dataset = PreloadedDataset([], "sentence")
     
     # =========================================================================
     # VALIDATE-CHECKPOINT MODE: Just run inference to check losses
@@ -1917,11 +2079,13 @@ def main():
         print("\n*** WORD-ONLY MODE: Training on word-level data only ***")
         print("    This validates that the checkpoint loads correctly.\n")
         args.word_ratio = 1.0  # 100% word data
+        args.word_ratio_end = 1.0
         
     elif mode == "sentence-only":
         print("\n*** SENTENCE-ONLY MODE: Training on sentence-level data only ***")
         print("    This shows baseline loss on sentence data.\n")
         args.word_ratio = 0.0  # 0% word data
+        args.word_ratio_end = 0.0
     
     # Check if we have data
     if len(word_dataset) == 0 and len(sentence_dataset) == 0:
@@ -1931,14 +2095,46 @@ def main():
     if len(word_dataset) == 0 and mode != "sentence-only":
         print("\nWarning: No word-level data found. Using sentence-level only.")
         args.word_ratio = 0.0
+        args.word_ratio_end = 0.0
     
     if len(sentence_dataset) == 0 and mode != "word-only":
         print("\nWarning: No sentence-level data found. Using word-level only.")
         args.word_ratio = 1.0
+        args.word_ratio_end = 1.0
     
-    # Create mixed dataloader
-    # Note: When preloading, num_workers=0 is fine since data is already in RAM
     effective_num_workers = 0 if args.preload else args.num_workers
+    val_dataloader = None
+
+    if args.val_data_dir:
+        val_dataset = build_sequence_dataset(
+            root_dir=args.val_data_dir,
+            stats_path=args.stats_path,
+            max_seq_len=args.max_seq_len,
+            preload=args.preload,
+            show_progress=args.preload,
+            data_type="sentence",
+        )
+        if len(val_dataset) > 0:
+            val_dataloader = create_val_dataloader(
+                val_dataset=val_dataset,
+                batch_size=args.batch_size,
+                num_workers=effective_num_workers,
+            )
+            print(f"\n[Validation]\n  Using external validation set with {len(val_dataset)} samples")
+    elif len(sentence_dataset) > 20:
+        train_size = len(sentence_dataset) - max(1, int(len(sentence_dataset) * 0.1))
+        val_size = len(sentence_dataset) - train_size
+        sentence_dataset, sentence_val = random_split(
+            sentence_dataset,
+            [train_size, val_size],
+            generator=torch.Generator().manual_seed(42),
+        )
+        val_dataloader = create_val_dataloader(
+            val_dataset=sentence_val,
+            batch_size=args.batch_size,
+            num_workers=effective_num_workers,
+        )
+        print(f"\n[Validation]\n  Using held-out sentence split with {len(sentence_val)} samples")
     
     dataloader = create_mixed_dataloader(
         word_dataset=word_dataset,
@@ -1961,6 +2157,15 @@ def main():
         scheduler_type=args.lr_scheduler,
         num_epochs=args.epochs,
         restart_period=args.lr_restart_period,
+        word_dataset=word_dataset,
+        sentence_dataset=sentence_dataset,
+        batch_size=args.batch_size,
+        num_workers=effective_num_workers,
+        word_ratio_start=args.word_ratio,
+        word_ratio_end=args.word_ratio_end,
+        word_ratio_ramp_epochs=args.word_ratio_ramp_epochs,
+        codebook_balance_weight=args.codebook_balance_weight,
+        early_stopping_patience=args.early_stopping_patience,
         device=DEVICE
     )
     
@@ -1981,7 +2186,7 @@ def main():
             print(f"\n*** Resuming training from epoch {checkpoint_epoch + 1} ***\n")
     
     # Train
-    trainer.train(num_epochs=args.epochs, save_every=args.save_every)
+    trainer.train(num_epochs=args.epochs, save_every=args.save_every, val_dataloader=val_dataloader)
     
     print("\nDone!")
 
