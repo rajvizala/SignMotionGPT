@@ -832,7 +832,7 @@ def load_model_from_hub(repo_id: str):
     """
     try:
         from unsloth import FastLanguageModel
-        from config import MAX_SEQ_LEN, DTYPE
+        from configs.config import MAX_SEQ_LEN, DTYPE
         
         print(f"\nLoading model from HuggingFace Hub (Unsloth): {repo_id}")
         model, tokenizer = FastLanguageModel.from_pretrained(

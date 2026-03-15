@@ -25,7 +25,7 @@ def load_trained_model(stage: int, device: torch.device):
     Load a trained model from a specific stage checkpoint.
     """
     # 1. Load data to get all motion tokens (needed for vocabulary resizing)
-    from config import DATA_JSON_PATH
+    from configs.config import DATA_JSON_PATH
     all_entries = read_json_data(DATA_JSON_PATH)
     cleaned_data, all_motion_tokens = deduplicate_and_prepare_data(all_entries)
 
