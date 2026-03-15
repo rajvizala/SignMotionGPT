@@ -1,0 +1,45 @@
+{
+  "name": "exp1_lexicon_memory",
+  "description": "Sentence training with retrieved word-level lexicon memory and continued word replay.",
+  "data": {
+    "train_json": "./data/motion_llm_dataset.json",
+    "dev_json": null,
+    "test_json": null,
+    "word_json": "./data/motion_llm_dataset.json",
+    "max_seq_len": 384,
+    "min_motion_tokens": 8,
+    "max_motion_tokens": 256
+  },
+  "retrieval": {
+    "enabled": true,
+    "max_words": 6,
+    "variants_per_word": 1,
+    "anchor_tokens_per_variant": 6,
+    "include_motion_anchors": true,
+    "include_lengths": true
+  },
+  "objectives": {
+    "word_replay_weight": 0.3,
+    "contrastive_weight": 0.0,
+    "denoise_weight": 0.0,
+    "denoise_mask_ratio": 0.25,
+    "randomized_position": false,
+    "max_position_offset": 2048,
+    "contrastive_temperature": 0.07
+  },
+  "training": {
+    "model_name": "Qwen/Qwen3-0.6B",
+    "output_dir": "./agent_experiment_runs/exp1_lexicon_memory",
+    "epochs": 10,
+    "batch_size": 4,
+    "eval_batch_size": 4,
+    "learning_rate": 2e-05,
+    "weight_decay": 0.01,
+    "grad_accum": 1,
+    "max_steps": null,
+    "log_every": 10,
+    "save_every": 200,
+    "seed": 42,
+    "num_workers": 0
+  }
+}
