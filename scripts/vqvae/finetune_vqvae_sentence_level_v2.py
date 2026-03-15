@@ -82,6 +82,22 @@ GDRIVE_CHECKPOINT_DIR = "/content/drive/MyDrive/finetune_combine_checkpoint"
 _HAND_SLICE = slice(73, 163)   # lhand + rhand  (90 dims)
 _BODY_SLICE = slice(10, 73)    # body_pose       (63 dims)
 
+# Dims to zero out for sign language (not relevant for hand/body motion)
+# shape(0:10) + jaw(163:166) + expression(166:176) + cam_trans(179:182)
+ZERO_DIMS_SIGN = [
+    (0, 10),      # shape -- constant per signer
+    (163, 166),   # jaw_pose -- handled by OSX
+    (166, 176),   # expression -- handled by OSX
+    (179, 182),   # cam_trans -- camera only
+]
+
+
+def apply_dim_mask(motion: torch.Tensor, zero_ranges=ZERO_DIMS_SIGN):
+    """Zero out irrelevant dimensions in-place."""
+    for start, end in zero_ranges:
+        motion[:, :, start:end] = 0.0
+    return motion
+
 
 # ===================================================================
 # Checkpoint management
@@ -652,7 +668,8 @@ class FinetuneTrainer:
                  scheduler_type="cosine_warmup", num_epochs=100,
                  warmup_epochs=10, restart_period=100,
                  codebook_reset_every=5, codebook_reset_threshold=2,
-                 noise_sigma=0.005, device=DEVICE):
+                 noise_sigma=0.005, zero_irrelevant=False,
+                 device=DEVICE):
         self.model = model.to(device)
         self.dataloader = dataloader
         self.output_dir = output_dir
@@ -664,6 +681,7 @@ class FinetuneTrainer:
         self.hand_loss_weight = hand_loss_weight
         self.body_loss_weight = body_loss_weight
         self.geo_loss_weight = geo_loss_weight
+        self.zero_irrelevant = zero_irrelevant
         self.grad_clip = grad_clip
         self.learning_rate = learning_rate
         self.scheduler_type = scheduler_type
@@ -762,6 +780,9 @@ class FinetuneTrainer:
         motion = batch["motion"].to(self.device)
         lengths = batch["lengths"]
         types = batch["types"]
+
+        if self.zero_irrelevant:
+            motion = apply_dim_mask(motion.clone())
 
         x_recon, vq_loss, perplexity = self.model(motion)
 
@@ -900,7 +921,7 @@ class FinetuneTrainer:
                 if batch is None:
                     continue
                 _, m = self.compute_loss(batch)
-                losses.append(m["recon_loss"])
+                losses.append(m["train_recon_simple"])
         self.model.train()
         return float(np.mean(losses)) if losses else float("inf")
 
@@ -1188,6 +1209,9 @@ def parse_args():
     p.add_argument("--noise-sigma", type=float, default=0.005,
                    help="Augmentation noise std (v2 default: 0.005, "
                         "was 0.02)")
+    p.add_argument("--zero-irrelevant", action="store_true",
+                   help="Zero out shape, jaw, expression, cam_trans "
+                        "before forward pass (recommended for sign language)")
     return p.parse_args()
 
 
@@ -1213,6 +1237,12 @@ def main():
     model = load_vqvae_checkpoint(args.vqvae_ckpt, VQ_CONFIG, DEVICE)
 
     set_quantizer_ema_mu(model, args.ema_mu)
+
+    if args.zero_irrelevant:
+        zeroed = sum(e - s for s, e in ZERO_DIMS_SIGN)
+        active = SMPL_DIM - zeroed
+        print(f"  Zeroing irrelevant dims: shape, jaw, expression, cam_trans "
+              f"({zeroed} dims zeroed, {active} active)")
 
     # --- Datasets ---
     if args.preload:
@@ -1314,6 +1344,7 @@ def main():
         codebook_reset_every=args.codebook_reset_every,
         codebook_reset_threshold=args.codebook_reset_threshold,
         noise_sigma=args.noise_sigma,
+        zero_irrelevant=args.zero_irrelevant,
         device=DEVICE)
 
     if resume_ckpt:
