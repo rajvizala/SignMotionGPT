@@ -197,8 +197,13 @@ def set_quantizer_ema_mu(model: VQVAEWrapper, mu: float):
 @torch.no_grad()
 def reset_dead_codes(model: VQVAEWrapper, dataloader: DataLoader,
                      device=DEVICE, usage_threshold: int = 2,
-                     num_batches: int = 20):
-    """Reset underutilized codebook entries from fresh encoder outputs."""
+                     num_batches: int = 50):
+    """Reset underutilized codebook entries from fresh encoder outputs.
+
+    Samples num_batches from the dataloader, counts how often each code
+    is used, and replaces codes used fewer than usage_threshold times
+    with fresh encoder vectors.
+    """
     model.eval()
     quantizer = model.vqvae.quantizer
     codebook_size = quantizer.nb_code
@@ -219,17 +224,32 @@ def reset_dead_codes(model: VQVAEWrapper, dataloader: DataLoader,
 
     model.train()
     if not all_codes:
+        print("  [Codebook] No data available for codebook analysis")
         return 0
 
     all_codes_np = np.concatenate(all_codes)
     counts = np.bincount(all_codes_np, minlength=codebook_size)
+    total_tokens = len(all_codes_np)
+    active_codes = int((counts > 0).sum())
+    low_use_codes = int((counts < usage_threshold).sum())
+    zero_use_codes = int((counts == 0).sum())
+
+    print(f"  [Codebook] Scanned {total_tokens} tokens from {num_batches} batches")
+    print(f"    Active: {active_codes}/{codebook_size} "
+          f"({100*active_codes/codebook_size:.1f}%) | "
+          f"Zero-use: {zero_use_codes} | "
+          f"Below threshold (<{usage_threshold}): {low_use_codes}")
+
     dead_idx = np.where(counts < usage_threshold)[0]
     num_dead = len(dead_idx)
     if num_dead == 0:
+        print(f"    All codes healthy -- no reset needed")
         return 0
 
     z_pool = torch.cat(encoder_vecs, dim=0)
     if z_pool.shape[0] < num_dead:
+        print(f"    Not enough encoder vectors ({z_pool.shape[0]}) "
+              f"to reset {num_dead} codes -- skipping")
         return 0
 
     perm = torch.randperm(z_pool.shape[0])[:num_dead]
@@ -240,8 +260,7 @@ def reset_dead_codes(model: VQVAEWrapper, dataloader: DataLoader,
         quantizer.code_sum.data[dead_idx_t] = z_pool[perm]
         quantizer.code_count.data[dead_idx_t] = 1.0
 
-    print(f"  [Codebook] Reset {num_dead}/{codebook_size} dead codes "
-          f"(threshold={usage_threshold})")
+    print(f"    Reset {num_dead} codes from encoder outputs")
     return num_dead
 
 
