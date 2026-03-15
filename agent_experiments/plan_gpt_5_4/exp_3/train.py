@@ -22,6 +22,7 @@ from agent_experiments.plan_gpt_5_4.shared.data_utils import (
     load_vqvae_checkpoint,
     normalize_motion,
     pad_motion_batch,
+    unnormalize_motion,
 )
 from agent_experiments.plan_gpt_5_4.shared.eval_harness import BUCKET_KEYS, empty_result
 from agent_experiments.plan_gpt_5_4.shared.training_utils import (
@@ -57,9 +58,9 @@ def evaluate_model(model, dataloader, mean, std, device, max_batches=None):
             lengths = batch["lengths"]
             normalized = normalize_motion(motion, mean, std)
             codes, _ = model.encode(normalized)
-            recon = decode_codes_batch(model, codes).cpu()
+            recon = unnormalize_motion(decode_codes_batch(model, codes), mean, std).cpu()
             for row_idx, length in enumerate(lengths.tolist()):
-                metrics = compute_mse_breakdown(recon[row_idx], normalized.cpu()[row_idx], length)
+                metrics = compute_mse_breakdown(recon[row_idx], batch["motion"][row_idx], length)
                 overall_sum += metrics["overall_mse"]
                 hand_sum += metrics["hand_mse"]
                 body_sum += metrics["body_mse"]
