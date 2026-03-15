@@ -668,8 +668,8 @@ def cosine_warmup_lambda(epoch, warmup_epochs, total_epochs, min_lr_ratio=0.01):
 class FinetuneTrainer:
     def __init__(self, model: VQVAEWrapper, dataloader: DataLoader,
                  output_dir: str, *,
-                 learning_rate=1e-5, vq_loss_weight=2.0,
-                 vel_loss_weight=0.5, hand_loss_weight=2.0,
+                 learning_rate=1e-5, vq_loss_weight=2.5,
+                 vel_loss_weight=0.5, hand_loss_weight=3.0,
                  body_loss_weight=1.0, geo_loss_weight=0.2,
                  grad_clip=1.0, gdrive_dir=GDRIVE_CHECKPOINT_DIR,
                  scheduler_type="cosine_warmup", num_epochs=100,
@@ -1191,11 +1191,11 @@ def parse_args():
     p.add_argument("--batch-size", type=int, default=8)
     p.add_argument("--learning-rate", type=float, default=1e-5)
     p.add_argument("--word-ratio", type=float, default=0.2)
-    p.add_argument("--vq-loss-weight", type=float, default=2.0,
-                   help="(default: 2.0)")
+    p.add_argument("--vq-loss-weight", type=float, default=2.5,
+                   help="(default: 2.5)")
     p.add_argument("--vel-loss-weight", type=float, default=0.5)
-    p.add_argument("--hand-loss-weight", type=float, default=2.0,
-                   help="(default: 2.0)")
+    p.add_argument("--hand-loss-weight", type=float, default=3.0,
+                   help="(default: 3.0, 3x body weight)")
     p.add_argument("--body-loss-weight", type=float, default=1.0)
     p.add_argument("--geo-loss-weight", type=float, default=0.2)
     p.add_argument("--save-every", type=int, default=5)
