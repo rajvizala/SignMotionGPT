@@ -356,18 +356,97 @@ def compute_jerk_loss(recon, target, mask,
 
 
 # ===================================================================
-# Augmentation (gentler than v1)
+# Augmentation
 # ===================================================================
+
+def temporal_stretch(motion: torch.Tensor, mask: torch.Tensor,
+                     low: float = 0.8, high: float = 1.2):
+    """Randomly resample each sequence in the batch to a different speed.
+
+    Uses linear interpolation along the time axis. Sequences that would
+    exceed the padded length are clamped; sequences that shrink get the
+    mask adjusted accordingly.
+
+    Args:
+        motion: (B, T, C) padded motion tensor.
+        mask:   (B, T) validity mask (1 for real frames, 0 for padding).
+        low/high: speed multiplier range (0.8 = 20% slower, 1.2 = 20% faster).
+
+    Returns:
+        (stretched_motion, new_lengths) with the same (B, T, C) shape.
+    """
+    B, T, C = motion.shape
+    lengths = mask.sum(dim=1).long()
+    out = motion.clone()
+    new_lengths = lengths.clone()
+
+    for i in range(B):
+        L = lengths[i].item()
+        if L < 8:
+            continue
+        factor = random.uniform(low, high)
+        new_L = min(T, max(8, int(round(L * factor))))
+        if new_L == L:
+            continue
+
+        src = motion[i, :L].unsqueeze(0).permute(0, 2, 1)
+        resampled = F.interpolate(src, size=new_L, mode='linear',
+                                  align_corners=True)
+        resampled = resampled.permute(0, 2, 1).squeeze(0)
+
+        out[i] = 0.0
+        out[i, :new_L] = resampled
+        new_lengths[i] = new_L
+
+    return out, new_lengths
+
 
 def augment_motion(motion: torch.Tensor, epoch: int,
                    warmup_epochs: int = 10,
                    noise_sigma: float = 0.005) -> torch.Tensor:
-    """Light augmentation; noise is disabled during warmup."""
+    """Light noise augmentation; disabled during warmup."""
     motion = motion.clone()
     if epoch > warmup_epochs and noise_sigma > 0:
         scale = min(1.0, (epoch - warmup_epochs) / 20.0)
         motion = motion + torch.randn_like(motion) * noise_sigma * scale
     return motion
+
+
+# ===================================================================
+# Multi-scale reconstruction loss
+# ===================================================================
+
+def multiscale_recon_loss(recon: torch.Tensor, target: torch.Tensor,
+                          mask: torch.Tensor,
+                          scales=(2, 4),
+                          loss_fn=F.mse_loss):
+    """Compute reconstruction loss at multiple temporal scales.
+
+    For each scale s, both recon and target are average-pooled over
+    non-overlapping windows of s frames, then compared. This teaches
+    the codebook to capture both fine-grained and coarse motion patterns.
+
+    Returns the mean loss across all scales.
+    """
+    total = torch.tensor(0.0, device=recon.device)
+    n_scales = 0
+
+    for s in scales:
+        B, T, C = recon.shape
+        usable = (T // s) * s
+        if usable < s:
+            continue
+
+        r = recon[:, :usable].reshape(B, usable // s, s, C).mean(dim=2)
+        t = target[:, :usable].reshape(B, usable // s, s, C).mean(dim=2)
+        m = mask[:, :usable].reshape(B, usable // s, s).min(dim=2).values
+
+        m_exp = m.unsqueeze(-1).expand_as(r)
+        diff = (r - t) ** 2 * m_exp
+        total = total + diff.sum() / (m_exp.sum() + 1e-8)
+        n_scales += 1
+
+    return total / max(1, n_scales)
 
 
 # ===================================================================
@@ -676,6 +755,7 @@ class FinetuneTrainer:
                  warmup_epochs=10, restart_period=100,
                  codebook_reset_every=5, codebook_reset_threshold=2,
                  noise_sigma=0.005, zero_irrelevant=False,
+                 multiscale_weight=0.5, temporal_stretch_prob=0.3,
                  device=DEVICE):
         self.model = model.to(device)
         self.dataloader = dataloader
@@ -689,6 +769,8 @@ class FinetuneTrainer:
         self.body_loss_weight = body_loss_weight
         self.geo_loss_weight = geo_loss_weight
         self.zero_irrelevant = zero_irrelevant
+        self.multiscale_weight = multiscale_weight
+        self.temporal_stretch_prob = temporal_stretch_prob
         self.grad_clip = grad_clip
         self.learning_rate = learning_rate
         self.scheduler_type = scheduler_type
@@ -714,7 +796,7 @@ class FinetuneTrainer:
             "vel_loss": [], "hand_loss": [], "body_loss": [],
             "perplexity": [], "word_loss": [], "sentence_loss": [],
             "codebook_usage": [], "val_loss": [], "geo_loss": [],
-            "lr": [], "train_recon_simple": [],
+            "ms_loss": [], "lr": [], "train_recon_simple": [],
         }
 
     # ---------------------------------------------------------------
@@ -836,12 +918,19 @@ class FinetuneTrainer:
         # -- Geodesic (uses full-tensor indices internally) --
         geo_loss = compute_geodesic_loss(x_recon, motion, mask)
 
+        # -- Multi-scale reconstruction --
+        ms_loss = torch.tensor(0.0, device=self.device)
+        if self.multiscale_weight > 0:
+            ms_loss = multiscale_recon_loss(recon_k, motion_k, mask,
+                                            scales=(2, 4))
+
         total = (recon_loss
                  + self.vq_loss_weight * vq_loss
                  + self.vel_loss_weight * vel_loss
                  + self.hand_loss_weight * hand_loss
                  + self.body_loss_weight * body_loss
-                 + self.geo_loss_weight * geo_loss)
+                 + self.geo_loss_weight * geo_loss
+                 + self.multiscale_weight * ms_loss)
 
         # Simple MSE recon (kept dims only, same metric as val)
         simple_recon = ((recon_k - motion_k) ** 2 * mask_exp).sum() / (
@@ -862,7 +951,7 @@ class FinetuneTrainer:
             "hand_loss": hand_loss.item(), "body_loss": body_loss.item(),
             "perplexity": perplexity.item(),
             "word_loss": word_loss.item(), "sentence_loss": sent_loss.item(),
-            "geo_loss": geo_loss.item(),
+            "geo_loss": geo_loss.item(), "ms_loss": ms_loss.item(),
             "train_recon_simple": simple_recon.item(),
         }
         return total, metrics
@@ -903,6 +992,17 @@ class FinetuneTrainer:
                 batch["motion"], epoch,
                 warmup_epochs=self.warmup_epochs,
                 noise_sigma=self.noise_sigma)
+
+            if (epoch > self.warmup_epochs
+                    and self.temporal_stretch_prob > 0
+                    and random.random() < self.temporal_stretch_prob):
+                tmask = torch.zeros(batch["motion"].shape[0],
+                                    batch["motion"].shape[1])
+                for ii, ll in enumerate(batch["lengths"]):
+                    tmask[ii, :ll] = 1.0
+                batch["motion"], new_lens = temporal_stretch(
+                    batch["motion"], tmask)
+                batch["lengths"] = new_lens
 
             self.optimizer.zero_grad()
             loss, metrics = self.compute_loss(batch)
@@ -1049,7 +1149,7 @@ class FinetuneTrainer:
             for k in ["total_loss", "recon_loss", "vq_loss", "vel_loss",
                        "hand_loss", "body_loss", "perplexity", "word_loss",
                        "sentence_loss", "codebook_usage", "geo_loss",
-                       "lr", "train_recon_simple"]:
+                       "ms_loss", "lr", "train_recon_simple"]:
                 self.history[k].append(metrics.get(k, 0))
 
             # --- Logging ---
@@ -1069,7 +1169,8 @@ class FinetuneTrainer:
                   f"VQ: {metrics['vq_loss']:.4f}")
             print(f"           Hand: {metrics['hand_loss']:.4f} | "
                   f"Body: {metrics['body_loss']:.4f} | "
-                  f"Geo: {metrics['geo_loss']:.4f}")
+                  f"Geo: {metrics['geo_loss']:.4f} | "
+                  f"MS: {metrics['ms_loss']:.4f}")
             if val_loss > 0:
                 print(f"  Recon  -> Train: {train_simple:.6f} | "
                       f"Val: {val_loss:.6f}")
@@ -1231,6 +1332,12 @@ def parse_args():
     p.add_argument("--zero-irrelevant", action="store_true",
                    help="Zero out shape, jaw, expression, cam_trans "
                         "before forward pass (recommended for sign language)")
+    p.add_argument("--multiscale-weight", type=float, default=0.5,
+                   help="Weight for multi-scale recon loss at 2- and "
+                        "4-frame windows (default: 0.5, 0 to disable)")
+    p.add_argument("--temporal-stretch-prob", type=float, default=0.3,
+                   help="Probability of applying 0.8x-1.2x temporal "
+                        "stretch per batch (default: 0.3, 0 to disable)")
     return p.parse_args()
 
 
@@ -1364,6 +1471,8 @@ def main():
         codebook_reset_threshold=args.codebook_reset_threshold,
         noise_sigma=args.noise_sigma,
         zero_irrelevant=args.zero_irrelevant,
+        multiscale_weight=args.multiscale_weight,
+        temporal_stretch_prob=args.temporal_stretch_prob,
         device=DEVICE)
 
     if resume_ckpt:
