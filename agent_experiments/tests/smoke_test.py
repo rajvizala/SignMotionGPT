@@ -3,8 +3,13 @@ from __future__ import annotations
 import json
 import tempfile
 from pathlib import Path
+import sys
 
 import torch
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
 
 from agent_experiments.src.analysis import build_bigram_set, summarize_sentence_split
 from agent_experiments.src.config import DataConfig, RetrievalConfig
