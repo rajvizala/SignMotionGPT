@@ -3,12 +3,14 @@ finetune_vqvae_sentence_level_v2.py  --  Improved fine-tuning script
 
 Changes from v1 / earlier drafts
 ---------------------------------
-* VQ loss weight raised  0.25 -> 1.0   (prevents encoder-codebook drift)
+* VQ loss weight raised  0.25 -> 2.0   (prevents encoder-codebook drift)
 * EMA momentum lowered   0.99 -> 0.95  (codebook tracks encoder faster)
 * Linear LR warmup over first N epochs (prevents early destabilisation)
 * Periodic codebook reset from encoder outputs (revives dead codes)
 * Removed double-penalisation: recon uses flat weights, component losses
-  (hand, body, vel, geo, jerk) provide the part-specific supervision
+  (hand, body, vel, geo) provide the part-specific supervision
+* Removed jerk loss (was not contributing to training)
+* Added train_recon_simple (MSE) for direct comparison with val recon
 * Augmentation noise disabled during warmup, reduced default sigma
 * Cosine annealing with warmup as default scheduler
 
@@ -643,10 +645,9 @@ def cosine_warmup_lambda(epoch, warmup_epochs, total_epochs, min_lr_ratio=0.01):
 class FinetuneTrainer:
     def __init__(self, model: VQVAEWrapper, dataloader: DataLoader,
                  output_dir: str, *,
-                 learning_rate=1e-5, vq_loss_weight=1.0,
+                 learning_rate=1e-5, vq_loss_weight=2.0,
                  vel_loss_weight=0.5, hand_loss_weight=2.0,
                  body_loss_weight=1.0, geo_loss_weight=0.2,
-                 jerk_loss_weight=0.1,
                  grad_clip=1.0, gdrive_dir=GDRIVE_CHECKPOINT_DIR,
                  scheduler_type="cosine_warmup", num_epochs=100,
                  warmup_epochs=10, restart_period=100,
@@ -663,7 +664,6 @@ class FinetuneTrainer:
         self.hand_loss_weight = hand_loss_weight
         self.body_loss_weight = body_loss_weight
         self.geo_loss_weight = geo_loss_weight
-        self.jerk_loss_weight = jerk_loss_weight
         self.grad_clip = grad_clip
         self.learning_rate = learning_rate
         self.scheduler_type = scheduler_type
@@ -689,7 +689,7 @@ class FinetuneTrainer:
             "vel_loss": [], "hand_loss": [], "body_loss": [],
             "perplexity": [], "word_loss": [], "sentence_loss": [],
             "codebook_usage": [], "val_loss": [], "geo_loss": [],
-            "jerk_loss": [], "lr": [],
+            "lr": [], "train_recon_simple": [],
         }
 
     # ---------------------------------------------------------------
@@ -796,16 +796,16 @@ class FinetuneTrainer:
         # -- Geodesic --
         geo_loss = compute_geodesic_loss(x_recon, motion, mask)
 
-        # -- Jerk --
-        jerk_loss = compute_jerk_loss(x_recon, motion, mask)
-
         total = (recon_loss
                  + self.vq_loss_weight * vq_loss
                  + self.vel_loss_weight * vel_loss
                  + self.hand_loss_weight * hand_loss
                  + self.body_loss_weight * body_loss
-                 + self.geo_loss_weight * geo_loss
-                 + self.jerk_loss_weight * jerk_loss)
+                 + self.geo_loss_weight * geo_loss)
+
+        # Simple MSE recon (same metric as val) for direct comparison
+        simple_recon = ((x_recon - motion) ** 2 * mask_exp).sum() / (
+            mask_exp.sum() + 1e-8)
 
         # Per-type monitoring
         wm = torch.tensor([1.0 if t == "word" else 0.0 for t in types],
@@ -822,7 +822,8 @@ class FinetuneTrainer:
             "hand_loss": hand_loss.item(), "body_loss": body_loss.item(),
             "perplexity": perplexity.item(),
             "word_loss": word_loss.item(), "sentence_loss": sent_loss.item(),
-            "geo_loss": geo_loss.item(), "jerk_loss": jerk_loss.item(),
+            "geo_loss": geo_loss.item(),
+            "train_recon_simple": simple_recon.item(),
         }
         return total, metrics
 
@@ -878,6 +879,7 @@ class FinetuneTrainer:
                 "vq": f"{metrics['vq_loss']:.4f}",
                 "hand": f"{metrics['hand_loss']:.4f}",
                 "body": f"{metrics['body_loss']:.4f}",
+                "ppl": f"{metrics['perplexity']:.0f}",
             })
 
         self.scheduler.step()
@@ -937,11 +939,11 @@ class FinetuneTrainer:
 
         axes[0, 0].plot(ep, self.history["total_loss"])
         axes[0, 0].set_title("Total Loss")
-        axes[0, 1].plot(ep, self.history["recon_loss"], label="Train")
+        axes[0, 1].plot(ep, self.history["train_recon_simple"], label="Train")
         if any(v > 0 for v in self.history["val_loss"]):
             axes[0, 1].plot(ep, self.history["val_loss"], label="Val")
-            axes[0, 1].legend()
-        axes[0, 1].set_title("Recon Loss")
+        axes[0, 1].legend()
+        axes[0, 1].set_title("Train vs Val Recon (MSE)")
         axes[0, 2].plot(ep, self.history["vq_loss"])
         axes[0, 2].set_title("VQ Loss")
         axes[0, 3].plot(ep, self.history["lr"])
@@ -1007,21 +1009,32 @@ class FinetuneTrainer:
             for k in ["total_loss", "recon_loss", "vq_loss", "vel_loss",
                        "hand_loss", "body_loss", "perplexity", "word_loss",
                        "sentence_loss", "codebook_usage", "geo_loss",
-                       "jerk_loss", "lr"]:
+                       "lr", "train_recon_simple"]:
                 self.history[k].append(metrics.get(k, 0))
 
             # --- Logging ---
             lr_now = self.optimizer.param_groups[0]['lr']
-            print(f"\n[Epoch {epoch}/{target}]  LR: {lr_now:.2e}")
+            cb_usage = metrics.get('codebook_usage', 0)
+            cb_active = int(cb_usage / 100 * VQ_CONFIG["code_num"])
+            cb_total = VQ_CONFIG["code_num"]
+            ppl = metrics.get('perplexity', 0)
+            train_simple = metrics.get('train_recon_simple', 0)
+
+            print(f"\n[Epoch {epoch}/{target}]  LR: {lr_now:.2e}  "
+                  f"Perplexity: {ppl:.1f}  "
+                  f"Codebook: {cb_active}/{cb_total} "
+                  f"({cb_usage:.1f}%)")
             print(f"  Train -> Total: {metrics['total_loss']:.4f} | "
                   f"Recon: {metrics['recon_loss']:.4f} | "
                   f"VQ: {metrics['vq_loss']:.4f}")
             print(f"           Hand: {metrics['hand_loss']:.4f} | "
                   f"Body: {metrics['body_loss']:.4f} | "
-                  f"Geo: {metrics['geo_loss']:.4f} | "
-                  f"Jerk: {metrics['jerk_loss']:.4f}")
+                  f"Geo: {metrics['geo_loss']:.4f}")
             if val_loss > 0:
-                print(f"  Val   -> Recon: {val_loss:.6f}")
+                print(f"  Recon  -> Train: {train_simple:.6f} | "
+                      f"Val: {val_loss:.6f}")
+            else:
+                print(f"  Recon  -> Train: {train_simple:.6f}")
 
             # --- Checkpoint ---
             if epoch % save_every == 0 or epoch == target:
@@ -1138,14 +1151,13 @@ def parse_args():
     p.add_argument("--batch-size", type=int, default=8)
     p.add_argument("--learning-rate", type=float, default=1e-5)
     p.add_argument("--word-ratio", type=float, default=0.2)
-    p.add_argument("--vq-loss-weight", type=float, default=1.0,
-                   help="(v2 default: 1.0, was 0.25)")
+    p.add_argument("--vq-loss-weight", type=float, default=2.0,
+                   help="(default: 2.0)")
     p.add_argument("--vel-loss-weight", type=float, default=0.5)
     p.add_argument("--hand-loss-weight", type=float, default=2.0,
-                   help="(v2 default: 2.0, was 0.5)")
+                   help="(default: 2.0)")
     p.add_argument("--body-loss-weight", type=float, default=1.0)
     p.add_argument("--geo-loss-weight", type=float, default=0.2)
-    p.add_argument("--jerk-loss-weight", type=float, default=0.1)
     p.add_argument("--save-every", type=int, default=5)
     p.add_argument("--max-seq-len", type=int, default=512)
     p.add_argument("--num-workers", type=int, default=0)
@@ -1294,7 +1306,6 @@ def main():
         hand_loss_weight=args.hand_loss_weight,
         body_loss_weight=args.body_loss_weight,
         geo_loss_weight=args.geo_loss_weight,
-        jerk_loss_weight=args.jerk_loss_weight,
         gdrive_dir=args.gdrive_dir,
         scheduler_type=args.lr_scheduler,
         num_epochs=args.epochs,
