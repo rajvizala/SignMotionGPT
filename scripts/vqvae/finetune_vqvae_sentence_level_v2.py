@@ -82,21 +82,28 @@ GDRIVE_CHECKPOINT_DIR = "/content/drive/MyDrive/finetune_combine_checkpoint"
 _HAND_SLICE = slice(73, 163)   # lhand + rhand  (90 dims)
 _BODY_SLICE = slice(10, 73)    # body_pose       (63 dims)
 
-# Dims to zero out for sign language (not relevant for hand/body motion)
-# shape(0:10) + jaw(163:166) + expression(166:176) + cam_trans(179:182)
-ZERO_DIMS_SIGN = [
-    (0, 10),      # shape -- constant per signer
-    (163, 166),   # jaw_pose -- handled by OSX
-    (166, 176),   # expression -- handled by OSX
-    (179, 182),   # cam_trans -- camera only
-]
+# Indices to KEEP for sign language (body_pose + hands + root_pose)
+# body_pose(10:73) + lhand(73:118) + rhand(118:163) + root_pose(176:179)
+KEEP_INDICES_SIGN = list(range(10, 163)) + list(range(176, 179))  # 156 dims
+SIGN_DIM = len(KEEP_INDICES_SIGN)  # 156
 
 
-def apply_dim_mask(motion: torch.Tensor, zero_ranges=ZERO_DIMS_SIGN):
-    """Zero out irrelevant dimensions in-place."""
-    for start, end in zero_ranges:
-        motion[:, :, start:end] = 0.0
-    return motion
+def strip_irrelevant(motion: torch.Tensor,
+                     keep_idx=KEEP_INDICES_SIGN) -> torch.Tensor:
+    """Extract only the relevant dims from the full 182-dim vector."""
+    return motion[:, :, keep_idx]
+
+
+def restore_full(stripped: torch.Tensor,
+                 keep_idx=KEEP_INDICES_SIGN,
+                 full_dim=SMPL_DIM) -> torch.Tensor:
+    """Pad stripped tensor back to 182 dims (zeros for removed dims)."""
+    B, T, _ = stripped.shape
+    full = torch.zeros(B, T, full_dim, device=stripped.device,
+                       dtype=stripped.dtype)
+    idx = torch.tensor(keep_idx, device=stripped.device)
+    full[:, :, idx] = stripped
+    return full
 
 
 # ===================================================================
@@ -782,7 +789,9 @@ class FinetuneTrainer:
         types = batch["types"]
 
         if self.zero_irrelevant:
-            motion = apply_dim_mask(motion.clone())
+            motion = motion.clone()
+            motion = strip_irrelevant(motion)
+            motion = restore_full(motion)
 
         x_recon, vq_loss, perplexity = self.model(motion)
 
@@ -791,18 +800,28 @@ class FinetuneTrainer:
         for i, l in enumerate(lengths):
             mask[i, :l] = 1.0
 
-        # -- Reconstruction (flat weights -- no per-dim boost) --
-        recon_raw = self.recon_loss_fn(x_recon, motion)
+        if self.zero_irrelevant:
+            keep = torch.tensor(KEEP_INDICES_SIGN, device=self.device)
+            motion_k = motion[:, :, keep]
+            recon_k = x_recon[:, :, keep]
+        else:
+            motion_k = motion
+            recon_k = x_recon
+
+        C = motion_k.shape[2]
+
+        # -- Reconstruction (only on kept dims) --
+        recon_raw = self.recon_loss_fn(recon_k, motion_k)
         mask_exp = mask.unsqueeze(-1).expand_as(recon_raw)
         recon_loss = (recon_raw * mask_exp).sum() / (mask_exp.sum() + 1e-8)
 
-        # -- Velocity --
-        vel_t = motion[:, 1:] - motion[:, :-1]
-        vel_r = x_recon[:, 1:] - x_recon[:, :-1]
+        # -- Velocity (only on kept dims) --
+        vel_t = motion_k[:, 1:] - motion_k[:, :-1]
+        vel_r = recon_k[:, 1:] - recon_k[:, :-1]
         vm = mask[:, 1:].unsqueeze(-1).expand_as(vel_t)
         vel_loss = ((vel_r - vel_t) ** 2 * vm).sum() / (vm.sum() + 1e-8)
 
-        # -- Hand --
+        # -- Hand (always full-tensor indices, unaffected by stripping) --
         h_t = motion[:, :, _HAND_SLICE]
         h_r = x_recon[:, :, _HAND_SLICE]
         hm = mask.unsqueeze(-1).expand(-1, -1, 90)
@@ -814,7 +833,7 @@ class FinetuneTrainer:
         bm = mask.unsqueeze(-1).expand(-1, -1, 63)
         body_loss = ((b_r - b_t) ** 2 * bm).sum() / (bm.sum() + 1e-8)
 
-        # -- Geodesic --
+        # -- Geodesic (uses full-tensor indices internally) --
         geo_loss = compute_geodesic_loss(x_recon, motion, mask)
 
         total = (recon_loss
@@ -824,8 +843,8 @@ class FinetuneTrainer:
                  + self.body_loss_weight * body_loss
                  + self.geo_loss_weight * geo_loss)
 
-        # Simple MSE recon (same metric as val) for direct comparison
-        simple_recon = ((x_recon - motion) ** 2 * mask_exp).sum() / (
+        # Simple MSE recon (kept dims only, same metric as val)
+        simple_recon = ((recon_k - motion_k) ** 2 * mask_exp).sum() / (
             mask_exp.sum() + 1e-8)
 
         # Per-type monitoring
@@ -1239,10 +1258,10 @@ def main():
     set_quantizer_ema_mu(model, args.ema_mu)
 
     if args.zero_irrelevant:
-        zeroed = sum(e - s for s, e in ZERO_DIMS_SIGN)
-        active = SMPL_DIM - zeroed
-        print(f"  Zeroing irrelevant dims: shape, jaw, expression, cam_trans "
-              f"({zeroed} dims zeroed, {active} active)")
+        print(f"  --zero-irrelevant: stripping shape/jaw/expression/cam_trans "
+              f"({SMPL_DIM - SIGN_DIM} dims removed, {SIGN_DIM} active)")
+        print(f"    Input: 182 dims -> strip to {SIGN_DIM} -> "
+              f"pad back to 182 (zeros) -> model -> loss on {SIGN_DIM} dims")
 
     # --- Datasets ---
     if args.preload:
