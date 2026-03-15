@@ -1,0 +1,48 @@
+notes = "Full recipe targeting OOD generalization with robust checkpoint selection."
+
+[data]
+sentence_json = "/path/to/how2sign_sentence_tokens.json"
+word_json = "/path/to/asl_citizen_word_tokens.json"
+output_dir = "./agent_experiments/outputs/exp_d_full_recipe"
+max_seq_len = 256
+seed = 42
+split_seed = 123
+val_ratio = 0.1
+
+[model]
+model_name = "Qwen/Qwen3-0.6B"
+vqvae_ckpt = "/path/to/word_level_vqvae.pt"
+use_bfloat16 = true
+grad_checkpointing = true
+
+[training]
+epochs = 50
+batch_size = 16
+lr = 1.5e-5
+weight_decay = 0.02
+grad_accum = 1
+max_grad_norm = 1.0
+warmup_ratio = 0.1
+num_workers = 4
+eval_every_steps = 150
+save_every_steps = 400
+max_steps = -1
+replay_ratio = 0.25
+
+[regularization]
+label_smoothing = 0.08
+rdrop_alpha = 1.5
+use_rdrop = true
+use_sam = true
+sam_rho = 0.05
+use_swa = true
+swa_start_ratio = 0.6
+ewc_lambda = 75.0
+ewc_samples = 3072
+use_ewc = true
+
+[validation]
+group_by = ["motion_length_bucket", "text_length_bucket", "lexical_richness_bucket", "participant"]
+early_stop_patience = 10
+select_by = "worst_group_dtw_jpe_proxy"
+
